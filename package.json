@@ -1,0 +1,326 @@
+{
+  "name": "sftp-plus",
+  "displayName": "SFTP+",
+  "description": "Full read/write access to SFTP/FTPS servers via rclone mount",
+  "version": "0.1.0",
+  "publisher": "cornuz",
+  "author": {
+    "name": "Raphael Cornuz",
+    "url": "https://github.com/cornuz"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cornuz/vscode-sftp-plus"
+  },
+  "bugs": {
+    "url": "https://github.com/cornuz/vscode-sftp-plus/issues"
+  },
+  "homepage": "https://github.com/cornuz/vscode-sftp-plus#readme",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "sftp",
+    "ftp",
+    "ftps",
+    "remote",
+    "mount",
+    "rclone",
+    "winfsp"
+  ],
+  "icon": "resources/icon.png",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "sftp-plus.connect",
+        "title": "SFTP+: Connect",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "sftp-plus.disconnect",
+        "title": "SFTP+: Disconnect",
+        "icon": "$(debug-disconnect)"
+      },
+      {
+        "command": "sftp-plus.disconnectAll",
+        "title": "SFTP+: Disconnect All"
+      },
+      {
+        "command": "sftp-plus.addConnection",
+        "title": "SFTP+: Add Connection",
+        "icon": "$(add)"
+      },
+      {
+        "command": "sftp-plus.editConnection",
+        "title": "SFTP+: Edit Connection",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "sftp-plus.removeConnection",
+        "title": "SFTP+: Remove Connection",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "sftp-plus.checkPrerequisites",
+        "title": "SFTP+: Check Prerequisites"
+      },
+      {
+        "command": "sftp-plus.installRclone",
+        "title": "SFTP+: Install rclone"
+      },
+      {
+        "command": "sftp-plus.installWinFsp",
+        "title": "SFTP+: Install WinFsp"
+      },
+      {
+        "command": "sftp-plus.downloadWinFsp",
+        "title": "SFTP+: Download WinFsp"
+      },
+      {
+        "command": "sftp-plus.showPrerequisiteDetails",
+        "title": "SFTP+: Show Prerequisite Details"
+      },
+      {
+        "command": "sftp-plus.refresh",
+        "title": "SFTP+: Refresh",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "sftp-plus.browseConnection",
+        "title": "SFTP+: Browse Files",
+        "icon": "$(folder-library)"
+      },
+      {
+        "command": "sftp-plus.openInExplorer",
+        "title": "SFTP+: Open in File Explorer",
+        "icon": "$(folder-opened)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "sftp-plus-explorer",
+          "title": "SFTP+",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "sftp-plus-explorer": [
+        {
+          "id": "sftp-plus.connections",
+          "name": "Hosts"
+        },
+        {
+          "type": "webview",
+          "id": "sftp-plus.hostDetails",
+          "name": "Details",
+          "visibility": "visible"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "sftp-plus.connections",
+        "contents": "No hosts configured.\n[Add Host](command:sftp-plus.addConnection)\n\nMake sure rclone and WinFsp are installed.\n[Check Prerequisites](command:sftp-plus.checkPrerequisites)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "sftp-plus.addConnection",
+          "when": "view == sftp-plus.connections",
+          "group": "navigation"
+        },
+        {
+          "command": "sftp-plus.refresh",
+          "when": "view == sftp-plus.connections",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "sftp-plus.connect",
+          "when": "view == sftp-plus.connections && viewItem == disconnected",
+          "group": "inline"
+        },
+        {
+          "command": "sftp-plus.disconnect",
+          "when": "view == sftp-plus.connections && viewItem == connected",
+          "group": "inline"
+        },
+        {
+          "command": "sftp-plus.openInExplorer",
+          "when": "view == sftp-plus.connections && viewItem == connected",
+          "group": "inline"
+        },
+        {
+          "command": "sftp-plus.editConnection",
+          "when": "view == sftp-plus.connections && viewItem =~ /^(connected|disconnected)$/",
+          "group": "inline"
+        },
+        {
+          "command": "sftp-plus.browseConnection",
+          "when": "view == sftp-plus.connections && viewItem == connected",
+          "group": "1_open@1"
+        },
+        {
+          "command": "sftp-plus.openInExplorer",
+          "when": "view == sftp-plus.connections && viewItem == connected",
+          "group": "1_open@2"
+        },
+        {
+          "command": "sftp-plus.editConnection",
+          "when": "view == sftp-plus.connections && viewItem =~ /^(connected|disconnected)$/",
+          "group": "2_modify"
+        },
+        {
+          "command": "sftp-plus.removeConnection",
+          "when": "view == sftp-plus.connections && viewItem =~ /^(connected|disconnected)$/",
+          "group": "3_remove"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "SFTP+",
+      "properties": {
+        "sftp-plus.connections": {
+          "type": "array",
+          "default": [],
+          "description": "List of SFTP/FTPS server connections",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Display name for this connection"
+              },
+              "host": {
+                "type": "string",
+                "description": "Server hostname or IP"
+              },
+              "port": {
+                "type": "number",
+                "default": 21,
+                "description": "Server port"
+              },
+              "protocol": {
+                "type": "string",
+                "enum": [
+                  "ftp",
+                  "ftps",
+                  "sftp"
+                ],
+                "default": "ftps",
+                "description": "Connection protocol"
+              },
+              "username": {
+                "type": "string",
+                "description": "Username for authentication"
+              },
+              "remotePath": {
+                "type": "string",
+                "default": "/",
+                "description": "Remote path to mount"
+              },
+              "driveLetter": {
+                "type": "string",
+                "description": "Windows drive letter (e.g., Z). Auto-assigned if empty."
+              },
+              "explicitTls": {
+                "type": "boolean",
+                "default": true,
+                "description": "Use explicit TLS for FTPS"
+              },
+              "ignoreCertErrors": {
+                "type": "boolean",
+                "default": false,
+                "description": "Ignore SSL certificate errors (for self-signed certs)"
+              },
+              "autoConnect": {
+                "type": "boolean",
+                "default": false,
+                "description": "Auto-connect when VS Code starts"
+              },
+              "cacheMode": {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "minimal",
+                  "writes",
+                  "full"
+                ],
+                "default": "full",
+                "description": "VFS cache mode for performance"
+              },
+              "idleTimeout": {
+                "type": "string",
+                "default": "5m",
+                "description": "Keep-alive idle timeout"
+              }
+            },
+            "required": [
+              "name",
+              "host",
+              "username"
+            ]
+          }
+        },
+        "sftp-plus.rclonePath": {
+          "type": "string",
+          "default": "",
+          "description": "Custom path to rclone executable (leave empty for PATH lookup)"
+        },
+        "sftp-plus.showStatusBar": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show connection status in the status bar"
+        },
+        "sftp-plus.logLevel": {
+          "type": "string",
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ],
+          "default": "info",
+          "description": "Logging verbosity"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "pnpm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts",
+    "test": "node ./out/test/runTest.js",
+    "package": "vsce package",
+    "publish": "vsce publish"
+  },
+  "devDependencies": {
+    "@types/node": "^22.x",
+    "@types/vscode": "^1.96.0",
+    "@typescript-eslint/eslint-plugin": "^8.x",
+    "@typescript-eslint/parser": "^8.x",
+    "@vscode/vsce": "^3.x",
+    "eslint": "^9.x",
+    "typescript": "^5.x"
+  },
+  "volta": {
+    "node": "20.18.0",
+    "pnpm": "9.15.0"
+  },
+  "dependencies": {
+    "@vscode/codicons": "^0.0.44"
+  }
+}
