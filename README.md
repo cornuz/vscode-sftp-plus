@@ -8,8 +8,6 @@
 
 SFTP+ solves the read-only limitation of existing SFTP extensions by mounting remote servers as native Windows drives using [rclone](https://rclone.org/) and [WinFsp](https://winfsp.dev/).
 
-![SFTP+ Screenshot](resources/screenshot.png)
-
 ## Features
 
 - 🔌 **Connect/Disconnect** - Mount FTPS/SFTP servers as Windows drives
@@ -23,25 +21,23 @@ SFTP+ solves the read-only limitation of existing SFTP extensions by mounting re
 
 ## Prerequisites
 
-SFTP+ requires two external tools (Windows only):
+SFTP+ requires two external tools (Windows only). **The extension can install them automatically via winget** - just click on rclone or WinFsp in the SFTP+ panel.
 
-### 1. rclone
+### Manual installation (optional)
 
+If you prefer to install manually:
+
+**rclone:**
 ```powershell
 winget install Rclone.Rclone
 ```
 
-Or download from: https://rclone.org/downloads/
-
-### 2. WinFsp
-
+**WinFsp:**
 ```powershell
 winget install WinFsp.WinFsp
 ```
 
-Or download from: https://winfsp.dev/rel/
-
-> **Note**: SFTP+ can install these automatically via winget from the extension panel.
+> **Note**: A system reboot may be required after installing WinFsp.
 
 ## Quick Start
 
