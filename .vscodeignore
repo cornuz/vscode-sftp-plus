@@ -8,3 +8,6 @@ tsconfig.json
 **/*.ts
 node_modules/**
 .specstory/**
+
+# Local data
+.sftp-plus/**
