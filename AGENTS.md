@@ -51,5 +51,11 @@ npx @vscode/vsce package --no-dependencies
 npx @vscode/vsce publish
 ```
 
+Or upload manually via web:
+
+1. Package the extension: `npx @vscode/vsce package --no-dependencies`
+2. Go to https://marketplace.visualstudio.com/manage/publishers/cornuz-design
+3. Click on SFTP+ → "Update" → Upload the `.vsix` file
+
 - **Publisher**: `cornuz-design`
 - **Marketplace**: https://marketplace.visualstudio.com/items?itemName=cornuz-design.sftp-plus

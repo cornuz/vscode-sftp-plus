@@ -2,12 +2,13 @@
 
 All notable changes to the SFTP+ extension will be documented in this file.
 
-## [0.1.3] - 2026-01-12
+## [0.1.4] - 2026-01-12
 
 ### Fixed
 
 - Delete button in connection settings now works (replaced blocked `confirm()` with VS Code native dialog)
 - Codicons now display correctly when extension is installed from Marketplace (bundled in resources folder)
+- Case-sensitivity issue with drive letter comparison on Windows
 - Case-sensitivity issue with drive letter comparison on Windows
 
 ### Added
