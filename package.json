@@ -2,7 +2,7 @@
   "name": "sftp-plus",
   "displayName": "SFTP+",
   "description": "Full read/write access to SFTP/FTPS servers via rclone mount",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "publisher": "cornuz-design",
   "author": {
     "name": "Raphael Cornuz",
