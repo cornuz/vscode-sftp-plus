@@ -76,6 +76,41 @@ Connections can be stored in two locations:
 
 Passwords are stored securely in VS Code's SecretStorage, or optionally in the workspace JSON file.
 
+### Workspace Configuration File
+
+You can create or edit `.vscode/sftp_plus.json` manually to configure connections for your workspace:
+
+```json
+{
+  "connections": [
+    {
+      "name": "My Server",
+      "host": "ftp.example.com",
+      "port": 21,
+      "protocol": "ftps",
+      "username": "myuser",
+      "password": "mypassword",
+      "remotePath": "/",
+      "driveLetter": "Z",
+      "autoConnect": false,
+      "explicitTls": true,
+      "ignoreCertErrors": false
+    }
+  ]
+}
+```
+
+#### Password Storage Options
+
+| Method | Location | Security | Use Case |
+|--------|----------|----------|----------|
+| **SecretStorage** | VS Code secure storage | ✅ Encrypted | Recommended for most users |
+| **Workspace JSON** | `.vscode/sftp_plus.json` | ⚠️ Plain text | Shared team configs, CI/CD |
+
+To store the password in the workspace file, simply add the `password` field to your connection object. If omitted, SFTP+ will prompt for the password and store it securely in VS Code's SecretStorage.
+
+> **⚠️ Security Warning**: If you add passwords to `sftp_plus.json`, make sure to add `.vscode/sftp_plus.json` to your `.gitignore` to avoid committing credentials to version control.
+
 ### Extension Settings
 
 | Setting | Type | Default | Description |

@@ -227,7 +227,7 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
           break;
 
         case 'deleteConnection':
-          await this._deleteConnection(message.name);
+          await this._confirmAndDeleteConnection(message.name);
           break;
 
         case 'deletePassword':
@@ -399,6 +399,17 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private async _confirmAndDeleteConnection(name: string): Promise<void> {
+    const answer = await vscode.window.showWarningMessage(
+      `Delete connection "${name}"?`,
+      { modal: true },
+      'Delete'
+    );
+    if (answer === 'Delete') {
+      await this._deleteConnection(name);
+    }
+  }
+
   private async _deleteConnection(name: string): Promise<void> {
     try {
       await this._connectionManager.removeConnection(name);
@@ -426,9 +437,9 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
   private _getHtml(): string {
     const nonce = this._getNonce();
 
-    // Get codicon font URI from VS Code
+    // Get codicon font URI from resources folder (bundled with extension)
     const codiconsUri = this._view?.webview.asWebviewUri(
-      vscode.Uri.joinPath(this._extensionUri, 'node_modules', '@vscode/codicons', 'dist', 'codicon.css')
+      vscode.Uri.joinPath(this._extensionUri, 'resources', 'codicon.css')
     );
 
     return `<!DOCTYPE html>
@@ -1361,9 +1372,7 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
 
         document.getElementById('deleteBtn')?.addEventListener('click', () => {
           const name = form.querySelector('[name="name"]').value;
-          if (confirm('Delete this connection?')) {
-            vscode.postMessage({ command: 'deleteConnection', name });
-          }
+          vscode.postMessage({ command: 'deleteConnection', name });
         });
 
         document.getElementById('deletePasswordBtn')?.addEventListener('click', (e) => {
