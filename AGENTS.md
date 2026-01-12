@@ -28,3 +28,28 @@ Rules and guidelines for AI agents working on this project.
 
 - Use conventional commit format: `type(scope): description`
 - Types: `feat`, `fix`, `docs`, `style`, `refactor`, `test`, `chore`
+
+## Publishing
+
+To publish updates to the VS Code Marketplace:
+
+1. Update version in `package.json`
+2. Update `CHANGELOG.md` with changes
+3. Commit and push to GitHub
+4. Package and publish:
+
+```bash
+npx @vscode/vsce publish patch   # 0.1.0 → 0.1.1
+npx @vscode/vsce publish minor   # 0.1.0 → 0.2.0
+npx @vscode/vsce publish major   # 0.1.0 → 1.0.0
+```
+
+Or manually:
+
+```bash
+npx @vscode/vsce package --no-dependencies
+npx @vscode/vsce publish
+```
+
+- **Publisher**: `cornuz-design`
+- **Marketplace**: https://marketplace.visualstudio.com/items?itemName=cornuz-design.sftp-plus
