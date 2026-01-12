@@ -3,7 +3,7 @@
   "displayName": "SFTP+",
   "description": "Full read/write access to SFTP/FTPS servers via rclone mount",
   "version": "0.1.0",
-  "publisher": "cornuz",
+  "publisher": "cornuz-design",
   "author": {
     "name": "Raphael Cornuz",
     "url": "https://github.com/cornuz"
@@ -18,7 +18,7 @@
   },
   "homepage": "https://github.com/cornuz/vscode-sftp-plus#readme",
   "engines": {
-    "vscode": "^1.85.0"
+    "vscode": "^1.96.0"
   },
   "categories": [
     "Other"

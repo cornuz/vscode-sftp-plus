@@ -1,6 +1,6 @@
 # SFTP+
 
-[![Visual Studio Marketplace](https://img.shields.io/visual-studio-marketplace/v/cornuz.sftp-plus?label=VS%20Marketplace)](https://marketplace.visualstudio.com/items?itemName=cornuz.sftp-plus)
+[![Visual Studio Marketplace](https://img.shields.io/visual-studio-marketplace/v/cornuz-design.sftp-plus?label=VS%20Marketplace)](https://marketplace.visualstudio.com/items?itemName=cornuz-design.sftp-plus)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![GitHub](https://img.shields.io/github/stars/cornuz/vscode-sftp-plus?style=social)](https://github.com/cornuz/vscode-sftp-plus)
 
