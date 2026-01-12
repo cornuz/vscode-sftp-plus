@@ -3,3 +3,7 @@ dist/
 *.vsix
 .vscode-test/
 .specstory/
+
+# SFTP+ local data
+.sftp-plus/
+.vscode/sftp_plus.json

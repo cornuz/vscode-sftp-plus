@@ -8,9 +8,18 @@ All notable changes to the SFTP+ extension will be documented in this file.
 
 - Delete button in connection settings now works (replaced blocked `confirm()` with VS Code native dialog)
 - Codicons now display correctly when extension is installed from Marketplace (bundled in resources folder)
+- Case-sensitivity issue with drive letter comparison on Windows
 
 ### Added
 
+- **File Tracking System**: Track files for sync monitoring with visual status indicators
+  - Context menu: Cloud Edit, Download, Track/Untrack files
+  - Sync status colors: Red (not downloaded), Orange (newer version), Green (synced)
+  - Tracking data stored in `.sftp-plus/tracking.json` (grouped by connection)
+  - Downloaded files saved to `.sftp-plus/[connection]/` folder
+- **SYNC RATE setting**: Auto-refresh interval for file browser (0 = disabled)
+- **Cloud Edit indicator**: Status bar shows connection name when editing remote files
+- **Refresh animation**: Spinning icon during file browser refresh
 - Documentation for manual workspace configuration file (`.vscode/sftp_plus.json`)
 - Documentation for password storage options
 

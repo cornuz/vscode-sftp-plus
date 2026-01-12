@@ -1,8 +1,9 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
-import { Connection, ConnectionConfig, ConnectionStatus, ConnectionScope, PasswordSource, DEFAULT_CONNECTION_CONFIG, InstallStatus } from '../models';
+import { Connection, ConnectionConfig, ConnectionStatus, ConnectionScope, PasswordSource, DEFAULT_CONNECTION_CONFIG, InstallStatus, SyncStatus } from '../models';
 import { ConnectionManager } from '../services/connection.manager';
+import { TrackingService, TrackedFileWithContext } from '../services/tracking.service';
 import { Logger } from '../utils/logger';
 
 /**
@@ -38,14 +39,20 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
   private _showFileSize = true; // Toggle for file size display
   private _showFileDate = false; // Toggle for file date display
   private _searchFilter = ''; // Search filter for file names
+  private _selectedFile?: string; // Currently selected file path
+  private _trackedFiles: Map<string, { file: TrackedFileWithContext; status: SyncStatus }> = new Map(); // Cached tracked files with status
   private _cachedPassword?: string; // Cached password for current connection display
   private _currentPrerequisite?: PrerequisiteInfo; // Currently selected prerequisite
   private _prerequisiteStatusListener?: vscode.Disposable;
+  private readonly _trackingService: TrackingService;
+  private _autoRefreshTimer?: ReturnType<typeof setInterval>; // Timer for auto-refresh
 
   constructor(
     private readonly _extensionUri: vscode.Uri,
     private readonly _connectionManager: ConnectionManager
-  ) {}
+  ) {
+    this._trackingService = new TrackingService();
+  }
 
   /**
    * Subscribe to prerequisite status changes to refresh the details panel
@@ -152,6 +159,11 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
     this._currentConnection = undefined;
     this._currentPath = undefined;
     this._cachedPassword = undefined;
+    // Stop auto-refresh timer
+    if (this._autoRefreshTimer) {
+      clearInterval(this._autoRefreshTimer);
+      this._autoRefreshTimer = undefined;
+    }
     this._updateView();
   }
 
@@ -267,8 +279,27 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
           await vscode.commands.executeCommand('vscode.open', uri);
           break;
 
+        case 'selectFile':
+          this._selectedFile = message.path;
+          // Don't update view - selection is handled in webview for responsiveness
+          break;
+
+        case 'downloadFile':
+          await this._downloadFile(message.path);
+          break;
+
+        case 'trackFile':
+          await this._trackFile(message.path);
+          break;
+
+        case 'untrackFile':
+          await this._untrackFile(message.path);
+          break;
+
         case 'refresh':
-          this._updateView();
+          await this._updateView();
+          // Notify webview that refresh is complete
+          this._view?.webview.postMessage({ command: 'refreshComplete' });
           break;
 
         case 'toggleSize':
@@ -314,8 +345,54 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
     this._updateView();
   }
 
-  private _updateView(): void {
+  /**
+   * Start or stop auto-refresh timer based on current connection and tab
+   */
+  private _updateAutoRefreshTimer(): void {
+    // Clear any existing timer
+    if (this._autoRefreshTimer) {
+      clearInterval(this._autoRefreshTimer);
+      this._autoRefreshTimer = undefined;
+    }
+
+    // Only auto-refresh when on Files tab with a connected connection and syncRate > 0
+    if (
+      this._currentConnection &&
+      this._currentTab === 'files' &&
+      this._currentConnection.status === ConnectionStatus.Connected &&
+      this._currentConnection.config.syncRate > 0
+    ) {
+      const intervalMs = this._currentConnection.config.syncRate * 1000;
+      this._autoRefreshTimer = setInterval(async () => {
+        // Clear tracking cache to force re-check
+        this._trackingService.clearCache();
+        await this._updateView();
+      }, intervalMs);
+    }
+  }
+
+  private async _updateView(): Promise<void> {
     if (!this._view) return;
+
+    // Update auto-refresh timer
+    this._updateAutoRefreshTimer();
+
+    // Load tracked files with sync status for current connection
+    if (this._currentConnection && this._currentTab === 'files' && this._currentConnection.mountedDrive) {
+      const trackedFiles = await this._trackingService.getTrackedFilesForConnection(
+        this._currentConnection.config.name,
+        this._currentConnection.mountedDrive
+      );
+      this._trackedFiles.clear();
+      for (const file of trackedFiles) {
+        const status = await this._trackingService.getSyncStatus(file);
+        // Use fullRemotePath as key to match with displayed files
+        this._trackedFiles.set(file.fullRemotePath, { file, status });
+      }
+    } else {
+      this._trackedFiles.clear();
+    }
+
     this._view.webview.html = this._getHtml();
   }
 
@@ -337,6 +414,7 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
         ignoreCertErrors: formData.ignoreCertErrors,
         cacheMode: formData.cacheMode,
         idleTimeout: formData.idleTimeout,
+        syncRate: formData.syncRate || 60,
       };
 
       if (this._isNewConnection) {
@@ -639,6 +717,13 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
     .btn-icon .codicon {
       margin: 0;
     }
+    .btn-icon.spinning .codicon {
+      animation: spin 1s linear infinite;
+    }
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
     .btn-danger {
       background: var(--vscode-errorForeground);
       color: white;
@@ -805,6 +890,97 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
     .file-item .meta.size {
       min-width: 60px;
       text-align: right;
+    }
+    .file-item.selected {
+      background: var(--vscode-list-activeSelectionBackground);
+      color: var(--vscode-list-activeSelectionForeground);
+    }
+    .file-item.selected .meta {
+      color: var(--vscode-list-activeSelectionForeground);
+      opacity: 0.8;
+    }
+    /* Spinning animation for refresh */
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+    .spinning .codicon-refresh {
+      animation: spin 1s linear infinite;
+    }
+
+    /* Tracking indicator - sync states */
+    .file-item.tracked.not-downloaded .name,
+    .file-item.tracked.not-downloaded .icon .codicon,
+    .file-item.tracked.not-downloaded .tracking-indicator {
+      color: var(--vscode-charts-red, #f14c4c);
+    }
+    .file-item.tracked.remote-newer .name,
+    .file-item.tracked.remote-newer .icon .codicon,
+    .file-item.tracked.remote-newer .tracking-indicator {
+      color: var(--vscode-charts-orange, #cca700);
+    }
+    .file-item.tracked.local-newer .name,
+    .file-item.tracked.local-newer .icon .codicon,
+    .file-item.tracked.local-newer .tracking-indicator {
+      color: var(--vscode-charts-orange, #cca700);
+    }
+    .file-item.tracked.synced .name,
+    .file-item.tracked.synced .icon .codicon,
+    .file-item.tracked.synced .tracking-indicator {
+      color: var(--vscode-charts-green, #89d185);
+    }
+    .file-item.tracked .tracking-indicator {
+      font-size: 12px;
+      flex-shrink: 0;
+      width: 16px;
+      text-align: center;
+    }
+    .file-item .tracking-indicator-placeholder {
+      width: 16px;
+      flex-shrink: 0;
+    }
+    .file-item.selected.tracked .name,
+    .file-item.selected.tracked .icon .codicon,
+    .file-item.selected.tracked .tracking-indicator {
+      color: var(--vscode-list-activeSelectionForeground);
+    }
+
+    /* Context Menu */
+    .context-menu {
+      position: fixed;
+      background: var(--vscode-menu-background);
+      border: 1px solid var(--vscode-menu-border);
+      border-radius: 4px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+      padding: 4px 0;
+      min-width: 160px;
+      z-index: 1000;
+      display: none;
+    }
+    .context-menu.visible {
+      display: block;
+    }
+    .context-menu-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 12px;
+      cursor: pointer;
+      font-size: 13px;
+      color: var(--vscode-menu-foreground);
+    }
+    .context-menu-item:hover {
+      background: var(--vscode-menu-selectionBackground);
+      color: var(--vscode-menu-selectionForeground);
+    }
+    .context-menu-item .codicon {
+      font-size: 14px;
+      width: 16px;
+    }
+    .context-menu-separator {
+      height: 1px;
+      background: var(--vscode-menu-separatorBackground);
+      margin: 4px 0;
     }
 
     .section-title {
@@ -1063,6 +1239,11 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
           <label for="ignoreCertErrors">Ignore SSL certificate errors</label>
         </div>
 
+        <div class="form-group" style="margin-top: 12px;">
+          <label>Sync Rate (seconds)</label>
+          <input type="number" name="syncRate" value="${config.syncRate || 60}" min="5" max="3600" placeholder="60">
+        </div>
+
         <div id="statusMessage"></div>
 
         <div class="button-row">
@@ -1108,6 +1289,26 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
           <ul class="file-list">
             ${files}
           </ul>
+        </div>
+        <!-- Context Menu -->
+        <div class="context-menu" id="contextMenu">
+          <div class="context-menu-item" data-action="cloudEdit">
+            <span class="codicon codicon-edit"></span>
+            <span>Cloud Edit</span>
+          </div>
+          <div class="context-menu-item" data-action="download">
+            <span class="codicon codicon-cloud-download"></span>
+            <span>Download</span>
+          </div>
+          <div class="context-menu-separator"></div>
+          <div class="context-menu-item" data-action="track" id="trackMenuItem">
+            <span class="codicon codicon-eye"></span>
+            <span>Track this file</span>
+          </div>
+          <div class="context-menu-item" data-action="untrack" id="untrackMenuItem" style="display: none;">
+            <span class="codicon codicon-eye-closed"></span>
+            <span>Untrack this file</span>
+          </div>
         </div>
       </div>
     `;
@@ -1192,13 +1393,49 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
           const stats = fs.statSync(fullPath);
           const sizeHtml = this._showFileSize ? `<span class="meta size">${this._formatSize(stats.size)}</span>` : '';
           const dateHtml = this._showFileDate ? `<span class="meta date">${this._formatDate(stats.mtime)}</span>` : '';
+          const selectedClass = this._selectedFile === fullPath ? ' selected' : '';
+
+          // Check tracking status
+          const trackedInfo = this._trackedFiles.get(fullPath);
+          const isTracked = !!trackedInfo;
+          let syncStatusClass = '';
+          let trackingIconClass = 'codicon-eye';
+
+          if (trackedInfo) {
+            switch (trackedInfo.status) {
+              case SyncStatus.NotDownloaded:
+                syncStatusClass = ' not-downloaded';
+                trackingIconClass = 'codicon-cloud-download';
+                break;
+              case SyncStatus.RemoteNewer:
+                syncStatusClass = ' remote-newer';
+                trackingIconClass = 'codicon-arrow-down';
+                break;
+              case SyncStatus.LocalNewer:
+                syncStatusClass = ' local-newer';
+                trackingIconClass = 'codicon-arrow-up';
+                break;
+              case SyncStatus.Synced:
+                syncStatusClass = ' synced';
+                trackingIconClass = 'codicon-check';
+                break;
+              default:
+                trackingIconClass = 'codicon-warning';
+            }
+          }
+
+          const trackedClass = isTracked ? ` tracked${syncStatusClass}` : '';
+          // Always reserve space for tracking icon to keep alignment
+          const trackingIcon = isTracked
+            ? `<span class="tracking-indicator codicon ${trackingIconClass}"></span>`
+            : `<span class="tracking-indicator-placeholder"></span>`;
 
           return `
-            <li class="file-item" data-action="open" data-path="${this._escapeHtml(fullPath)}" style="padding-left: ${indent}px;">
+            <li class="file-item${selectedClass}${trackedClass}" data-action="select" data-path="${this._escapeHtml(fullPath)}" style="padding-left: ${indent}px;">
               <span class="chevron-spacer"></span>
               <span class="icon"><span class="codicon ${iconClass}"></span></span>
               <span class="name">${this._escapeHtml(entry.name)}</span>
-              ${dateHtml}${sizeHtml}
+              ${dateHtml}${sizeHtml}${trackingIcon}
             </li>
           `;
         }
@@ -1222,6 +1459,87 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
       return date.toLocaleDateString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' });
     } else {
       return date.toLocaleDateString([], { day: '2-digit', month: 'short', year: 'numeric' });
+    }
+  }
+
+  /**
+   * Download a file to .sftp-plus/[connection]/ folder
+   */
+  private async _downloadFile(remotePath: string): Promise<void> {
+    try {
+      if (!this._currentConnection) {
+        vscode.window.showErrorMessage('No connection selected');
+        return;
+      }
+
+      const workspaceFolders = vscode.workspace.workspaceFolders;
+      if (!workspaceFolders || workspaceFolders.length === 0) {
+        vscode.window.showErrorMessage('No workspace folder open. Please open a folder first.');
+        return;
+      }
+
+      const workspaceRoot = workspaceFolders[0].uri.fsPath;
+      const connectionName = this._currentConnection.config.name;
+      const fileName = path.basename(remotePath);
+
+      // Calculate local path: .sftp-plus/[connection]/[relative-path]
+      // Extract path after drive letter (e.g., Z:\folder\file.txt -> folder\file.txt)
+      const relativePath = remotePath.substring(3); // Remove "Z:\"
+      const localPath = path.join(workspaceRoot, '.sftp-plus', connectionName, relativePath);
+
+      // Ensure directory exists
+      await fs.promises.mkdir(path.dirname(localPath), { recursive: true });
+
+      // Copy file from mounted drive to local
+      await fs.promises.copyFile(remotePath, localPath);
+
+      vscode.window.showInformationMessage(`Downloaded: ${fileName}`);
+
+      // Open the downloaded file
+      const localUri = vscode.Uri.file(localPath);
+      await vscode.commands.executeCommand('vscode.open', localUri);
+
+      // Refresh view to update sync status if file is tracked
+      this._updateView();
+    } catch (error) {
+      Logger.error('Failed to download file:', error);
+      vscode.window.showErrorMessage(`Failed to download file: ${error}`);
+    }
+  }
+
+  /**
+   * Track a file for sync monitoring
+   */
+  private async _trackFile(remotePath: string): Promise<void> {
+    if (!this._currentConnection) {
+      vscode.window.showErrorMessage('No connection selected');
+      return;
+    }
+
+    const connectionName = this._currentConnection.config.name;
+    const success = await this._trackingService.trackFile(remotePath, connectionName);
+
+    if (success) {
+      // Refresh view to show tracking indicator
+      this._updateView();
+    }
+  }
+
+  /**
+   * Untrack a file
+   */
+  private async _untrackFile(remotePath: string): Promise<void> {
+    if (!this._currentConnection) {
+      vscode.window.showErrorMessage('No connection selected');
+      return;
+    }
+
+    const connectionName = this._currentConnection.config.name;
+    const success = await this._trackingService.untrackFile(remotePath, connectionName);
+
+    if (success) {
+      // Refresh view to remove tracking indicator
+      this._updateView();
     }
   }
 
@@ -1350,6 +1668,7 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
             autoConnect: formData.get('autoConnect') === 'on',
             explicitTls: formData.get('explicitTls') === 'on',
             ignoreCertErrors: formData.get('ignoreCertErrors') === 'on',
+            syncRate: parseInt(formData.get('syncRate')) || 60,
           };
           vscode.postMessage({ command: 'saveConnection', config });
         });
@@ -1385,7 +1704,9 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
       }
 
       // File browser
-      document.getElementById('refreshBtn')?.addEventListener('click', () => {
+      const refreshBtn = document.getElementById('refreshBtn');
+      refreshBtn?.addEventListener('click', () => {
+        refreshBtn.classList.add('spinning');
         vscode.postMessage({ command: 'refresh' });
       });
 
@@ -1437,10 +1758,73 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
             vscode.postMessage({ command: 'toggleFolder', path: filePath });
           } else if (action === 'navigate') {
             vscode.postMessage({ command: 'navigateTo', path: filePath });
-          } else if (action === 'open') {
-            vscode.postMessage({ command: 'openFile', path: filePath });
+          } else if (action === 'select') {
+            // Select file (update visual state)
+            document.querySelectorAll('.file-item.selected').forEach(el => el.classList.remove('selected'));
+            item.classList.add('selected');
+            vscode.postMessage({ command: 'selectFile', path: filePath });
           }
         });
+
+        // Right-click context menu for files
+        item.addEventListener('contextmenu', (e) => {
+          const action = item.dataset.action;
+          if (action !== 'select') return; // Only for files, not folders
+
+          e.preventDefault();
+          const filePath = item.dataset.path;
+          const isTracked = item.classList.contains('tracked');
+
+          // Select the file first
+          document.querySelectorAll('.file-item.selected').forEach(el => el.classList.remove('selected'));
+          item.classList.add('selected');
+          vscode.postMessage({ command: 'selectFile', path: filePath });
+
+          // Show/hide track/untrack menu items
+          const trackItem = document.getElementById('trackMenuItem');
+          const untrackItem = document.getElementById('untrackMenuItem');
+          if (trackItem) trackItem.style.display = isTracked ? 'none' : 'flex';
+          if (untrackItem) untrackItem.style.display = isTracked ? 'flex' : 'none';
+
+          // Show context menu
+          const menu = document.getElementById('contextMenu');
+          if (menu) {
+            menu.style.left = e.clientX + 'px';
+            menu.style.top = e.clientY + 'px';
+            menu.classList.add('visible');
+            menu.dataset.filePath = filePath;
+          }
+        });
+      });
+
+      // Context menu actions
+      const contextMenu = document.getElementById('contextMenu');
+      if (contextMenu) {
+        contextMenu.querySelectorAll('.context-menu-item').forEach(menuItem => {
+          menuItem.addEventListener('click', () => {
+            const action = menuItem.dataset.action;
+            const filePath = contextMenu.dataset.filePath;
+            contextMenu.classList.remove('visible');
+
+            if (action === 'cloudEdit') {
+              vscode.postMessage({ command: 'openFile', path: filePath });
+            } else if (action === 'download') {
+              vscode.postMessage({ command: 'downloadFile', path: filePath });
+            } else if (action === 'track') {
+              vscode.postMessage({ command: 'trackFile', path: filePath });
+            } else if (action === 'untrack') {
+              vscode.postMessage({ command: 'untrackFile', path: filePath });
+            }
+          });
+        });
+      }
+
+      // Hide context menu on click outside
+      document.addEventListener('click', (e) => {
+        const menu = document.getElementById('contextMenu');
+        if (menu && !menu.contains(e.target)) {
+          menu.classList.remove('visible');
+        }
       });
 
       // Handle messages from extension
@@ -1456,6 +1840,12 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
               if (message.cursorPos !== undefined) {
                 searchEl.setSelectionRange(message.cursorPos, message.cursorPos);
               }
+            }
+            break;
+          case 'refreshComplete':
+            const refreshBtn = document.getElementById('refreshBtn');
+            if (refreshBtn) {
+              refreshBtn.classList.remove('spinning');
             }
             break;
           case 'testStarted':
