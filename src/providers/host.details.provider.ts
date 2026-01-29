@@ -220,6 +220,18 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  /**
+   * Refresh tracked files - rescans local files and updates sync status
+   * Call this after download/upload operations to ensure display is updated
+   */
+  async refreshTrackedFiles(): Promise<void> {
+    // Rescan local .sftp-plus files to update tracking.json
+    await this._trackingService.autoScanLocalFiles();
+    // Clear cache and reload tracked files with fresh sync status
+    this._trackingService.clearCache();
+    await this._updateView();
+  }
+
   private _revealView(): void {
     if (this._view) {
       this._view.show?.(true);
@@ -323,26 +335,6 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
           }
           break;
 
-        case 'trackFile':
-          if (message.paths && Array.isArray(message.paths)) {
-            for (const filePath of message.paths) {
-              await this._trackFile(filePath);
-            }
-          } else {
-            await this._trackFile(message.path);
-          }
-          break;
-
-        case 'untrackFile':
-          if (message.paths && Array.isArray(message.paths)) {
-            for (const filePath of message.paths) {
-              await this._untrackFile(filePath);
-            }
-          } else {
-            await this._untrackFile(message.path);
-          }
-          break;
-
         case 'renameFile':
           await this._renameFile(message.path);
           break;
@@ -400,9 +392,9 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
           break;
 
         case 'toggleAiWrite':
-          // Toggle AI write access for a file/folder
+          // Toggle AI write access for a file/folder (async - shows menu)
           if (this._mcpManager && this._currentConnection) {
-            this._mcpManager.toggleAiWriteAccess(this._currentConnection.config.name, message.path);
+            await this._mcpManager.toggleAiWriteAccess(this._currentConnection.config.name, message.path);
           }
           break;
 
@@ -417,6 +409,23 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
           // Revoke AI write on folder
           if (this._mcpManager && this._currentConnection) {
             await this._mcpManager.revokeAiWriteOnFolder(this._currentConnection.config.name, message.path);
+          }
+          break;
+
+        case 'reconnect':
+          // Reconnect the current connection
+          if (this._currentConnection) {
+            try {
+              // First disconnect
+              await vscode.commands.executeCommand('sftp-plus.disconnect', this._currentConnection.config.name);
+              // Wait a bit for cleanup
+              await new Promise(resolve => setTimeout(resolve, 500));
+              // Then reconnect
+              await vscode.commands.executeCommand('sftp-plus.connect', this._currentConnection.config.name);
+            } catch (error) {
+              Logger.error(`Reconnect failed: ${error}`);
+              vscode.window.showErrorMessage(`Failed to reconnect: ${error}`);
+            }
           }
           break;
 
@@ -1001,12 +1010,12 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
     .file-item.tracked.remote-newer .name,
     .file-item.tracked.remote-newer .icon .codicon,
     .file-item.tracked.remote-newer .tracking-indicator {
-      color: var(--vscode-charts-orange, #cca700);
+      color: #ff0000;
     }
     .file-item.tracked.local-newer .name,
     .file-item.tracked.local-newer .icon .codicon,
     .file-item.tracked.local-newer .tracking-indicator {
-      color: var(--vscode-charts-orange, #cca700);
+      color: #569cd6;
     }
     .file-item.tracked.synced .name,
     .file-item.tracked.synced .icon .codicon,
@@ -1049,15 +1058,21 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
     .ai-toggle.ai-readonly:hover {
       opacity: 1;
     }
-    .ai-toggle.ai-writable {
-      color: var(--vscode-charts-orange, #cca700);
+    .ai-toggle.ai-local {
+      color: #22c55e; /* Green for local mode */
+    }
+    .ai-toggle.ai-host {
+      color: #ff0000; /* Red for host mode */
     }
     .file-item.selected .ai-toggle.ai-readonly {
       color: var(--vscode-list-activeSelectionForeground);
       opacity: 0.5;
     }
-    .file-item.selected .ai-toggle.ai-writable {
-      color: var(--vscode-charts-orange, #cca700);
+    .file-item.selected .ai-toggle.ai-local {
+      color: #22c55e;
+    }
+    .file-item.selected .ai-toggle.ai-host {
+      color: #ff0000;
     }
 
     /* Context Menu */
@@ -1428,15 +1443,6 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
             <span class="codicon codicon-trash"></span>
             <span>Delete</span>
           </div>
-          <div class="context-menu-separator"></div>
-          <div class="context-menu-item" data-action="track" id="trackMenuItem">
-            <span class="codicon codicon-eye"></span>
-            <span>Track this file</span>
-          </div>
-          <div class="context-menu-item" data-action="untrack" id="untrackMenuItem" style="display: none;">
-            <span class="codicon codicon-eye-closed"></span>
-            <span>Untrack this file</span>
-          </div>
         </div>
       </div>
     `;
@@ -1573,7 +1579,29 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
         }
       }).join('');
     } catch (error) {
-      return `<li class="file-item" style="color: var(--vscode-errorForeground)"><span class="codicon codicon-error"></span> Error reading directory</li>`;
+      Logger.error(`Error reading directory ${dirPath}: ${error}`);
+      const errorMessage = error instanceof Error ? error.message : String(error);
+
+      // Check if it's a common connection issue
+      let hint = '';
+      if (errorMessage.includes('ENOENT') || errorMessage.includes('not accessible')) {
+        hint = ' - Drive may be disconnected. Try reconnecting.';
+      } else if (errorMessage.includes('ETIMEDOUT') || errorMessage.includes('timeout')) {
+        hint = ' - Connection timed out. Try reconnecting.';
+      } else if (errorMessage.includes('EACCES') || errorMessage.includes('permission')) {
+        hint = ' - Permission denied.';
+      }
+
+      return `
+        <li class="file-item" style="color: var(--vscode-errorForeground)">
+          <span class="codicon codicon-error"></span> Error reading directory${hint}
+        </li>
+        <li class="file-item">
+          <button class="action-button" data-action="reconnect" style="margin-left: 24px; margin-top: 8px;">
+            <span class="codicon codicon-refresh"></span> Reconnect
+          </button>
+        </li>
+      `;
     }
   }
 
@@ -1598,19 +1626,38 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
   }
 
   /**
+   * Get the AI write mode for a path
+   */
+  private _getAiWriteMode(filePath: string): 'local' | 'host' | null {
+    if (!this._mcpManager || !this._currentConnection) {
+      return null;
+    }
+    return this._mcpManager.getAiWriteMode(this._currentConnection.config.name, filePath);
+  }
+
+  /**
    * Get the AI toggle icon HTML for a file/folder
+   * - No icon: read-only (click to set mode)
+   * - Green (copilot): LOCAL mode (click to revoke)
+   * - Red (copilot-warning): HOST mode (click to revoke)
    */
   private _getAiToggleIcon(filePath: string): string {
     if (!this._isMcpActive()) {
       return ''; // No icon if MCP is not active
     }
 
-    const isWritable = this._isAiWritable(filePath);
-    const iconClass = isWritable ? 'codicon-copilot-warning' : 'codicon-copilot';
-    const colorClass = isWritable ? 'ai-writable' : 'ai-readonly';
-    const title = isWritable ? 'AI can write (click to revoke)' : 'AI read-only (click to allow write)';
+    const mode = this._getAiWriteMode(filePath);
 
-    return `<span class="ai-toggle ${colorClass}" data-action="toggleAiWrite" data-path="${this._escapeHtml(filePath)}" title="${title}"><span class="codicon ${iconClass}"></span></span>`;
+    if (mode === 'local') {
+      // Green = Local mode
+      return `<span class="ai-toggle ai-local" data-action="toggleAiWrite" data-path="${this._escapeHtml(filePath)}" title="AI Local mode (diff preview) - click to revoke"><span class="codicon codicon-copilot"></span></span>`;
+    } else if (mode === 'host') {
+      // Red = Host mode
+      return `<span class="ai-toggle ai-host" data-action="toggleAiWrite" data-path="${this._escapeHtml(filePath)}" title="AI Host mode (direct write) - click to revoke"><span class="codicon codicon-copilot-warning"></span></span>`;
+    } else {
+      // Gray = No access (click to set mode)
+      return `<span class="ai-toggle ai-readonly" data-action="toggleAiWrite" data-path="${this._escapeHtml(filePath)}" title="AI read-only - click to allow write"><span class="codicon codicon-copilot"></span></span>`;
+    }
   }
 
   /**
@@ -1667,47 +1714,11 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
       const localUri = vscode.Uri.file(localPath);
       await vscode.commands.executeCommand('vscode.open', localUri);
 
-      // Refresh view to update sync status if file is tracked
-      this._updateView();
+      // Refresh tracked files to update sync status (rescans and updates display)
+      await this.refreshTrackedFiles();
     } catch (error) {
       Logger.error('Failed to download file:', error);
       vscode.window.showErrorMessage(`Failed to download file: ${error}`);
-    }
-  }
-
-  /**
-   * Track a file for sync monitoring
-   */
-  private async _trackFile(remotePath: string): Promise<void> {
-    if (!this._currentConnection) {
-      vscode.window.showErrorMessage('No connection selected');
-      return;
-    }
-
-    const connectionName = this._currentConnection.config.name;
-    const success = await this._trackingService.trackFile(remotePath, connectionName);
-
-    if (success) {
-      // Refresh view to show tracking indicator
-      this._updateView();
-    }
-  }
-
-  /**
-   * Untrack a file
-   */
-  private async _untrackFile(remotePath: string): Promise<void> {
-    if (!this._currentConnection) {
-      vscode.window.showErrorMessage('No connection selected');
-      return;
-    }
-
-    const connectionName = this._currentConnection.config.name;
-    const success = await this._trackingService.untrackFile(remotePath, connectionName);
-
-    if (success) {
-      // Refresh view to remove tracking indicator
-      this._updateView();
     }
   }
 
@@ -2137,6 +2148,14 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
         });
       });
 
+      // Reconnect button handler (shown on connection errors)
+      document.querySelectorAll('[data-action="reconnect"]').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          vscode.postMessage({ command: 'reconnect' });
+        });
+      });
+
       // Track selected files for multi-selection
       let selectedFiles = [];
 
@@ -2215,8 +2234,6 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
           const downloadItem = document.querySelector('[data-action="download"]');
           const renameItem = document.querySelector('[data-action="rename"]');
           const duplicateItem = document.querySelector('[data-action="duplicate"]');
-          const trackItem = document.getElementById('trackMenuItem');
-          const untrackItem = document.getElementById('untrackMenuItem');
 
           // Cloud Edit, Download: only for files (single or multi)
           if (cloudEditItem) cloudEditItem.style.display = allFiles ? 'flex' : 'none';
@@ -2225,10 +2242,6 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
           // Rename, Duplicate: only for single selection
           if (renameItem) renameItem.style.display = (!multiSelect) ? 'flex' : 'none';
           if (duplicateItem) duplicateItem.style.display = (!multiSelect) ? 'flex' : 'none';
-
-          // Track/Untrack: only for files
-          if (trackItem) trackItem.style.display = (allFiles && !isTracked) ? 'flex' : 'none';
-          if (untrackItem) untrackItem.style.display = (allFiles && isTracked) ? 'flex' : 'none';
 
           // Update menu item labels for multi-select
           if (cloudEditItem) {
@@ -2240,12 +2253,6 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
           const deleteItem = document.querySelector('[data-action="delete"]');
           if (deleteItem) {
             deleteItem.querySelector('span:last-child').textContent = multiSelect ? 'Delete (' + selectedPaths.length + ')' : 'Delete';
-          }
-          if (trackItem) {
-            trackItem.querySelector('span:last-child').textContent = multiSelect ? 'Track (' + selectedPaths.length + ')' : 'Track this file';
-          }
-          if (untrackItem) {
-            untrackItem.querySelector('span:last-child').textContent = multiSelect ? 'Untrack (' + selectedPaths.length + ')' : 'Untrack this file';
           }
 
           // Show context menu
@@ -2313,18 +2320,6 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
                 vscode.postMessage({ command: 'deleteFile', paths: selectedPaths });
               } else {
                 vscode.postMessage({ command: 'deleteFile', path: filePath });
-              }
-            } else if (action === 'track') {
-              if (isMultiSelect) {
-                vscode.postMessage({ command: 'trackFile', paths: selectedPaths });
-              } else {
-                vscode.postMessage({ command: 'trackFile', path: filePath });
-              }
-            } else if (action === 'untrack') {
-              if (isMultiSelect) {
-                vscode.postMessage({ command: 'untrackFile', paths: selectedPaths });
-              } else {
-                vscode.postMessage({ command: 'untrackFile', path: filePath });
               }
             }
           });

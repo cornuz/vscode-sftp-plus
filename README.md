@@ -1,15 +1,16 @@
-# SFTP+
+# SFTP+ MCP
 
 [![Visual Studio Marketplace](https://img.shields.io/visual-studio-marketplace/v/cornuz-design.sftp-plus?label=VS%20Marketplace)](https://marketplace.visualstudio.com/items?itemName=cornuz-design.sftp-plus)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![GitHub](https://img.shields.io/github/stars/cornuz/vscode-sftp-plus?style=social)](https://github.com/cornuz/vscode-sftp-plus)
 
-**Full read/write access to SFTP/FTPS servers in VS Code**
+**Full read/write access to SFTP/FTPS servers in VS Code with AI/Copilot integration**
 
-SFTP+ solves the read-only limitation of existing SFTP extensions by mounting remote servers as native Windows drives using [rclone](https://rclone.org/) and [WinFsp](https://winfsp.dev/).
+SFTP+ solves the read-only limitation of existing SFTP extensions by mounting remote servers as native Windows drives using [rclone](https://rclone.org/) and [WinFsp](https://winfsp.dev/). **NEW in v0.2.0**: MCP Server integration gives GitHub Copilot direct access to your remote files!
 
 ## Features
 
+- 🤖 **Copilot Integration** - Give GitHub Copilot read/write access to remote files
 - 🔌 **Connect/Disconnect** - Mount FTPS/SFTP servers as Windows drives
 - 📁 **Full Read/Write** - Edit files directly, changes sync automatically
 - 🔐 **Secure Credentials** - Passwords stored in VS Code's secure storage
@@ -18,6 +19,45 @@ SFTP+ solves the read-only limitation of existing SFTP extensions by mounting re
 - 🌳 **Tree View** - Manage connections from the activity bar
 - 📂 **File Browser** - Browse remote files directly in VS Code
 - ⚙️ **Hybrid Config** - Store connections globally or per-workspace
+
+## 🤖 Copilot Integration
+
+SFTP+ provides **Language Model Tools** that allow GitHub Copilot to interact directly with your remote files. This uses VS Code's native Language Model API - no external MCP server configuration required!
+
+> **Note**: This feature is specific to GitHub Copilot in VS Code. It is not a standalone MCP server.
+
+### How to Enable
+
+1. Connect to your SFTP/FTPS server
+2. In the file browser, click the **AI icon** (robot) next to a file or folder
+3. Choose the access mode:
+   - **🟢 Local Mode** - Copilot edits a local copy, you review changes with diff preview before uploading
+   - **🔴 Host Mode** - Copilot writes directly to the remote server (use with caution)
+
+### Available AI Tools
+
+Once MCP is enabled, Copilot can use these tools:
+
+| Tool | Description |
+|------|-------------|
+| `sftp-plus_list_connections` | List all available SFTP/FTP connections |
+| `sftp-plus_list_files` | List files in a directory |
+| `sftp-plus_read_file` | Read file contents |
+| `sftp-plus_write_file` | Write/create files (requires write permission) |
+| `sftp-plus_prepare_edit` | Download file for local editing with diff preview |
+| `sftp-plus_search_files` | Search for files by pattern |
+| `sftp-plus_get_tree` | Get directory tree structure |
+
+### Sync Status Indicators
+
+Tracked files show their sync status with colors:
+- 🔴 **Red** - Remote is newer (needs download)
+- 🔵 **Blue** - Local is newer (needs upload)
+- 🟢 **Green** - Synced
+
+### Upload Changes
+
+After editing a local copy, right-click the file and select **"Upload to Host"** to sync your changes back to the server.
 
 ## Prerequisites
 

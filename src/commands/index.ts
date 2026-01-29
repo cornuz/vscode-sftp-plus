@@ -417,6 +417,76 @@ export function registerCommands(
       hostDetailsProvider?.refreshCurrentConnection();
     })
   );
+
+  // Upload to host command - uploads local .sftp-plus file back to server
+  context.subscriptions.push(
+    vscode.commands.registerCommand('sftp-plus.uploadToHost', async (uri?: vscode.Uri) => {
+      // Get the file URI from argument or active editor
+      let fileUri = uri;
+      if (!fileUri && vscode.window.activeTextEditor) {
+        fileUri = vscode.window.activeTextEditor.document.uri;
+      }
+
+      if (!fileUri) {
+        vscode.window.showErrorMessage('No file selected for upload');
+        return;
+      }
+
+      const localPath = fileUri.fsPath;
+
+      // Check if file is in .sftp-plus folder
+      const sftpPlusMatch = localPath.match(/[/\\]\.sftp-plus[/\\]([^/\\]+)[/\\](.+)$/);
+      if (!sftpPlusMatch) {
+        vscode.window.showErrorMessage('This file is not in a .sftp-plus folder');
+        return;
+      }
+
+      const connectionName = sftpPlusMatch[1];
+      const relativePath = sftpPlusMatch[2].replace(/\\/g, '/');
+
+      // Find the connection
+      const connection = connectionManager.getConnection(connectionName);
+      if (!connection) {
+        vscode.window.showErrorMessage(`Connection "${connectionName}" not found`);
+        return;
+      }
+
+      if (!connection.mountedDrive) {
+        vscode.window.showErrorMessage(`Connection "${connectionName}" is not mounted. Please connect first.`);
+        return;
+      }
+
+      // Construct remote path
+      const remotePath = `${connection.mountedDrive}:\\${relativePath.replace(/\//g, '\\')}`;
+
+      try {
+        // Check if local file exists
+        const fs = await import('fs');
+        if (!fs.existsSync(localPath)) {
+          vscode.window.showErrorMessage(`Local file not found: ${localPath}`);
+          return;
+        }
+
+        // Save the file first if it has unsaved changes
+        const document = vscode.workspace.textDocuments.find(d => d.uri.fsPath === localPath);
+        if (document?.isDirty) {
+          await document.save();
+        }
+
+        // Copy to remote
+        await fs.promises.copyFile(localPath, remotePath);
+
+        const fileName = localPath.split(/[/\\]/).pop();
+        vscode.window.showInformationMessage(`Uploaded "${fileName}" to ${connectionName}`);
+
+        // Refresh tracked files to update sync status display
+        await hostDetailsProvider?.refreshTrackedFiles();
+
+      } catch (error) {
+        vscode.window.showErrorMessage(`Failed to upload: ${error}`);
+      }
+    })
+  );
 }
 
 /**

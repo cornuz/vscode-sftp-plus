@@ -1,8 +1,8 @@
 {
   "name": "sftp-plus",
   "displayName": "SFTP+ MCP",
-  "description": "Full read/write access to SFTP/FTPS servers via rclone mount",
-  "version": "0.1.5",
+  "description": "Full read/write access to SFTP/FTPS servers with GitHub Copilot integration",
+  "version": "0.2.0",
   "publisher": "cornuz-design",
   "author": {
     "name": "Raphael Cornuz",
@@ -125,6 +125,11 @@
       {
         "command": "sftp-plus.revokeAiWriteFolder",
         "title": "SFTP+: Revoke AI Write on Folder"
+      },
+      {
+        "command": "sftp-plus.uploadToHost",
+        "title": "SFTP+: Upload to Host",
+        "icon": "$(cloud-upload)"
       }
     ],
     "languageModelTools": [
@@ -145,7 +150,7 @@
         "displayName": "List Files",
         "toolReferenceName": "sftp-ls",
         "icon": "$(tools)",
-        "modelDescription": "Lists files and folders on a remote SFTP/FTP server. Requires the connection to have Copilot access enabled. Returns file names, types (file/folder), and paths.",
+        "modelDescription": "Lists files and folders on a remote SFTP/FTP server. Supports recursive listing to get entire directory tree in one call. Use recursive=true for deep searches instead of calling list_files multiple times.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -157,6 +162,14 @@
             "path": {
               "type": "string",
               "description": "Remote path to list. Use '/' for root or omit for the configured remote path. Example: '/var/www'"
+            },
+            "recursive": {
+              "type": "boolean",
+              "description": "If true, recursively list all files and folders in subdirectories. Default is false. Use this to get entire directory tree in one call."
+            },
+            "maxDepth": {
+              "type": "number",
+              "description": "Maximum depth for recursive listing. Default is 10. Only used when recursive=true."
             }
           },
           "required": ["connectionName"]
@@ -186,10 +199,10 @@
       },
       {
         "name": "sftp-plus_write_file",
-        "displayName": "Write File",
+        "displayName": "Write File (Direct - No Diff)",
         "toolReferenceName": "sftp-write",
         "icon": "$(tools)",
-        "modelDescription": "Writes content to a file on a remote SFTP/FTP server. IMPORTANT: Requires BOTH Copilot access enabled on the connection AND explicit write permission granted by the user for the specific file/folder. If write access is denied, use sftp-plus_request_write_access to ask for permission.",
+        "modelDescription": "DEPRECATED for editing existing files - use sftp-plus_prepare_edit instead! This tool writes DIRECTLY to the server WITHOUT showing the user a diff preview. Only use this for: 1) Creating NEW files that don't exist yet, 2) Automated batch operations where diff preview is not needed. For editing existing files, ALWAYS use sftp-plus_prepare_edit first to download the file locally, then use standard Copilot edit tools.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -208,6 +221,28 @@
             }
           },
           "required": ["connectionName", "path", "content"]
+        }
+      },
+      {
+        "name": "sftp-plus_prepare_edit",
+        "displayName": "Prepare File for Edit (Recommended)",
+        "toolReferenceName": "sftp-edit",
+        "icon": "$(tools)",
+        "modelDescription": "ALWAYS USE THIS to edit existing files on remote servers! Downloads the file to local workspace, opens it in VS Code, then you can use standard Copilot edit tools (replace_string_in_file, etc.) which show the user a diff preview. The user can accept/reject changes before syncing back to server. This is the PREFERRED method for all file modifications.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "connectionName": {
+              "type": "string",
+              "description": "Name of the SFTP+ connection."
+            },
+            "path": {
+              "type": "string",
+              "description": "Remote path of the file to prepare for editing. Example: '/var/www/config.json'"
+            }
+          },
+          "required": ["connectionName", "path"]
         }
       },
       {
@@ -233,7 +268,7 @@
         "displayName": "Request Write Access",
         "toolReferenceName": "sftp-request-write",
         "icon": "$(tools)",
-        "modelDescription": "Requests write access for a specific file or folder on a remote server. This will show a notification to the user asking them to grant or deny write permission. Use this when sftp-plus_write_file fails due to missing permissions.",
+        "modelDescription": "ALWAYS use this first when you need to modify a file! Asks the user for write permission with two modes: LOCAL (downloads file for editing with diff preview - RECOMMENDED) or HOST (direct server write). If LOCAL mode is chosen, returns the local file path to use with standard Copilot edit tools.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -248,6 +283,75 @@
             }
           },
           "required": ["connectionName", "path"]
+        }
+      },
+      {
+        "name": "sftp-plus_search_files",
+        "displayName": "Search Files",
+        "toolReferenceName": "sftp-search",
+        "icon": "$(tools)",
+        "modelDescription": "PREFERRED for finding files. Searches for files matching a pattern (glob or regex) on a remote SFTP/FTP server. Much faster than calling list_files multiple times. Use this to find files by name pattern across the entire server or a subtree.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "connectionName": {
+              "type": "string",
+              "description": "Name of the SFTP+ connection to use."
+            },
+            "pattern": {
+              "type": "string",
+              "description": "Search pattern. Supports glob patterns (*.txt, test-*, **/*.js) or regex if useRegex=true. Examples: '*.log', 'config.*', 'test-big*', '**/*.json'"
+            },
+            "path": {
+              "type": "string",
+              "description": "Starting path for the search. Default is root '/'. Example: '/var/www'"
+            },
+            "useRegex": {
+              "type": "boolean",
+              "description": "If true, treat pattern as a regex instead of glob. Default is false (glob)."
+            },
+            "type": {
+              "type": "string",
+              "enum": ["file", "folder", "all"],
+              "description": "Filter results by type: 'file' (files only), 'folder' (directories only), or 'all' (both). Default is 'all'."
+            },
+            "maxResults": {
+              "type": "number",
+              "description": "Maximum number of results to return. Default is 100."
+            }
+          },
+          "required": ["connectionName", "pattern"]
+        }
+      },
+      {
+        "name": "sftp-plus_get_tree",
+        "displayName": "Get Directory Tree",
+        "toolReferenceName": "sftp-tree",
+        "icon": "$(tools)",
+        "modelDescription": "Returns the complete directory tree structure in a single call. Useful to understand the project structure before searching. More efficient than multiple list_files calls.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "connectionName": {
+              "type": "string",
+              "description": "Name of the SFTP+ connection to use."
+            },
+            "path": {
+              "type": "string",
+              "description": "Starting path for the tree. Default is root '/'."
+            },
+            "maxDepth": {
+              "type": "number",
+              "description": "Maximum depth to traverse. Default is 5."
+            },
+            "includeFiles": {
+              "type": "boolean",
+              "description": "Include files in the tree output. Default is true. Set to false for folders-only structure."
+            }
+          },
+          "required": ["connectionName"]
         }
       }
     ],
@@ -353,6 +457,27 @@
           "command": "sftp-plus.removeConnection",
           "when": "view == sftp-plus.connections && viewItem =~ /^(connected(-mcp)?|disconnected)$/",
           "group": "3_remove"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "sftp-plus.uploadToHost",
+          "when": "resourcePath =~ /\\.sftp-plus[\\\\/]/",
+          "group": "7_modification"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "sftp-plus.uploadToHost",
+          "when": "resourcePath =~ /\\.sftp-plus[\\\\/]/",
+          "group": "1_modification"
+        }
+      ],
+      "editor/title/context": [
+        {
+          "command": "sftp-plus.uploadToHost",
+          "when": "resourcePath =~ /\\.sftp-plus[\\\\/]/",
+          "group": "1_modification"
         }
       ]
     },

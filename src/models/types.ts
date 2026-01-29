@@ -97,8 +97,8 @@ export interface Connection {
   /** MCP server is active for this connection (runtime only) */
   mcpActive?: boolean;
 
-  /** Set of remote paths with AI write access (runtime only, reset on disconnect) */
-  aiWritablePaths?: Set<string>;
+  /** Map of remote paths to their AI write mode: 'local' (green) or 'host' (red) */
+  aiWritablePaths?: Map<string, 'local' | 'host'>;
 
   /** Obscured password for direct sync (runtime only, not persisted) */
   obscuredPassword?: string;

@@ -305,19 +305,23 @@ export class TrackingService {
         return SyncStatus.Error;
       }
 
-      // Compare modification times
+      // Compare by file size first, then by date if sizes differ
       const localStats = await fs.promises.stat(localFullPath);
       const remoteStats = await fs.promises.stat(trackedFile.fullRemotePath);
 
+      const localSize = localStats.size;
+      const remoteSize = remoteStats.size;
+
+      if (localSize === remoteSize) {
+        // Same size = consider as synced (content is identical)
+        return SyncStatus.Synced;
+      }
+
+      // Different sizes = compare modification times to determine which is newer
       const localMtime = localStats.mtime.getTime();
       const remoteMtime = remoteStats.mtime.getTime();
 
-      // Allow 1 second tolerance for filesystem differences
-      const tolerance = 1000;
-
-      if (Math.abs(localMtime - remoteMtime) <= tolerance) {
-        return SyncStatus.Synced;
-      } else if (remoteMtime > localMtime) {
+      if (remoteMtime > localMtime) {
         return SyncStatus.RemoteNewer;
       } else {
         return SyncStatus.LocalNewer;
@@ -380,5 +384,122 @@ export class TrackingService {
    */
   clearCache(): void {
     this._trackingData = null;
+  }
+
+  /**
+   * Auto-scan local .sftp-plus folders and sync tracking data
+   * This scans all files in .sftp-plus/[connection]/ folders and updates tracking.json
+   */
+  async autoScanLocalFiles(): Promise<void> {
+    const workspaceRoot = this._getWorkspaceRoot();
+    if (!workspaceRoot) return;
+
+    const sftpPlusFolder = path.join(workspaceRoot, TrackingService.TRACKING_FOLDER);
+
+    // Check if .sftp-plus folder exists
+    if (!fs.existsSync(sftpPlusFolder)) {
+      Logger.info('No .sftp-plus folder found, skipping auto-scan');
+      return;
+    }
+
+    Logger.info('Auto-scanning local .sftp-plus files...');
+
+    const data = await this.loadTrackingData();
+    let changed = false;
+
+    try {
+      // Get all connection folders (subdirectories of .sftp-plus, excluding tracking.json)
+      const entries = await fs.promises.readdir(sftpPlusFolder, { withFileTypes: true });
+      const connectionFolders = entries.filter(e => e.isDirectory());
+
+      for (const connFolder of connectionFolders) {
+        const connectionName = connFolder.name;
+        const connectionPath = path.join(sftpPlusFolder, connectionName);
+
+        // Initialize connection if needed
+        if (!data.connections[connectionName]) {
+          data.connections[connectionName] = { trackedFiles: [] };
+        }
+
+        // Get all files recursively in this connection folder
+        const localFiles = await this._scanDirectoryRecursive(connectionPath, '');
+
+        // Create a set of currently tracked paths for this connection
+        const trackedPaths = new Set(data.connections[connectionName].trackedFiles.map(f => f.remotePath));
+
+        // Add new files that aren't tracked yet
+        for (const relativePath of localFiles) {
+          if (!trackedPaths.has(relativePath)) {
+            const localPath = `.sftp-plus/${connectionName}/${relativePath}`;
+            data.connections[connectionName].trackedFiles.push({
+              remotePath: relativePath,
+              localPath,
+            });
+            changed = true;
+            Logger.info(`Auto-tracked: ${connectionName}/${relativePath}`);
+          }
+        }
+
+        // Remove tracked files that no longer exist locally
+        const localFileSet = new Set(localFiles);
+        const filesToRemove = data.connections[connectionName].trackedFiles.filter(
+          f => !localFileSet.has(f.remotePath)
+        );
+
+        if (filesToRemove.length > 0) {
+          data.connections[connectionName].trackedFiles = data.connections[connectionName].trackedFiles.filter(
+            f => localFileSet.has(f.remotePath)
+          );
+          changed = true;
+          for (const f of filesToRemove) {
+            Logger.info(`Auto-untracked (file deleted): ${connectionName}/${f.remotePath}`);
+          }
+        }
+
+        // Clean up empty connections
+        if (data.connections[connectionName].trackedFiles.length === 0) {
+          delete data.connections[connectionName];
+          changed = true;
+        }
+      }
+
+      // Save if changed
+      if (changed) {
+        await this.saveTrackingData(data);
+        Logger.info('Tracking data updated from auto-scan');
+      } else {
+        Logger.info('No changes detected during auto-scan');
+      }
+    } catch (error) {
+      Logger.error('Error during auto-scan:', error);
+    }
+  }
+
+  /**
+   * Recursively scan a directory and return all file paths (relative to the base)
+   */
+  private async _scanDirectoryRecursive(dirPath: string, relativePath: string): Promise<string[]> {
+    const results: string[] = [];
+
+    try {
+      const entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
+
+      for (const entry of entries) {
+        const entryRelativePath = relativePath ? `${relativePath}/${entry.name}` : entry.name;
+        const fullPath = path.join(dirPath, entry.name);
+
+        if (entry.isDirectory()) {
+          // Recurse into subdirectory
+          const subFiles = await this._scanDirectoryRecursive(fullPath, entryRelativePath);
+          results.push(...subFiles);
+        } else if (entry.isFile()) {
+          results.push(entryRelativePath);
+        }
+      }
+    } catch (error) {
+      Logger.error(`Error scanning directory ${dirPath}:`, error);
+    }
+
+    return results;
   }
 }

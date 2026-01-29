@@ -6,6 +6,7 @@ import { ConnectionManager } from './services/connection.manager';
 import { RcloneService } from './services/rclone.service';
 import { PrerequisiteChecker } from './services/prerequisite.checker';
 import { CredentialManager } from './services/credential.manager';
+import { TrackingService } from './services/tracking.service';
 import { McpManager } from './mcp';
 import { registerCommands } from './commands';
 import { Logger } from './utils/logger';
@@ -33,6 +34,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const prerequisiteChecker = new PrerequisiteChecker(rcloneService);
   const connectionManager = new ConnectionManager(rcloneService, credentialManager);
   globalConnectionManager = connectionManager;
+
+  // Initialize tracking service and auto-scan local files
+  const trackingService = new TrackingService();
+  await trackingService.autoScanLocalFiles();
 
   // Initialize password sources (async check of SecretStorage)
   await connectionManager.initializePasswordSources();
