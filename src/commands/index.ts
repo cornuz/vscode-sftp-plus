@@ -4,6 +4,7 @@ import { ConnectionTreeProvider, ConnectionTreeItem } from '../providers/connect
 import { HostDetailsProvider } from '../providers/host.details.provider';
 import { PrerequisiteChecker } from '../services/prerequisite.checker';
 import { ConnectionConfig, DEFAULT_CONNECTION_CONFIG } from '../models';
+import { McpManager } from '../mcp';
 import { exec } from 'child_process';
 
 /**
@@ -24,7 +25,8 @@ export function registerCommands(
   connectionManager: ConnectionManager,
   treeProvider: ConnectionTreeProvider,
   prerequisiteChecker: PrerequisiteChecker,
-  hostDetailsProvider?: HostDetailsProvider
+  hostDetailsProvider?: HostDetailsProvider,
+  mcpManager?: McpManager
 ): void {
 
   // Connect command
@@ -97,6 +99,18 @@ export function registerCommands(
   context.subscriptions.push(
     vscode.commands.registerCommand('sftp-plus.disconnectAll', async () => {
       await connectionManager.disconnectAll();
+    })
+  );
+
+  // Open remote file command (opens in non-preview mode for full editing)
+  context.subscriptions.push(
+    vscode.commands.registerCommand('sftp-plus.openRemoteFile', async (uri: vscode.Uri) => {
+      try {
+        const doc = await vscode.workspace.openTextDocument(uri);
+        await vscode.window.showTextDocument(doc, { preview: false });
+      } catch (error) {
+        vscode.window.showErrorMessage(`Failed to open file: ${error}`);
+      }
     })
   );
 
@@ -275,6 +289,132 @@ export function registerCommands(
         const path = `${driveLetter}:\\`;
         exec(`explorer "${path}"`);
       }
+    })
+  );
+
+  // Start MCP command
+  context.subscriptions.push(
+    vscode.commands.registerCommand('sftp-plus.startMcp', async (arg?: string | ConnectionTreeItem) => {
+      if (!mcpManager) {
+        vscode.window.showErrorMessage('MCP manager not available');
+        return;
+      }
+
+      let name = extractConnectionName(arg);
+
+      if (!name) {
+        // Show picker for connected hosts without MCP
+        const connections = connectionManager.getActiveConnections()
+          .filter(c => !c.mcpActive);
+
+        if (connections.length === 0) {
+          vscode.window.showInformationMessage('No connected hosts available for Copilot access');
+          return;
+        }
+
+        const picked = await vscode.window.showQuickPick(
+          connections.map(c => ({
+            label: c.config.name,
+            description: `${c.mountedDrive}:`,
+          })),
+          { placeHolder: 'Select host to enable Copilot access' }
+        );
+
+        if (picked) {
+          name = picked.label;
+        }
+      }
+
+      if (name) {
+        try {
+          await mcpManager.startMcp(name);
+          treeProvider.refresh();
+          hostDetailsProvider?.refreshCurrentConnection();
+        } catch (error) {
+          vscode.window.showErrorMessage(`Failed to enable Copilot access: ${error}`);
+        }
+      }
+    })
+  );
+
+  // Stop MCP command
+  context.subscriptions.push(
+    vscode.commands.registerCommand('sftp-plus.stopMcp', async (arg?: string | ConnectionTreeItem) => {
+      if (!mcpManager) {
+        vscode.window.showErrorMessage('MCP manager not available');
+        return;
+      }
+
+      let name = extractConnectionName(arg);
+
+      if (!name) {
+        // Show picker for MCP-enabled hosts
+        const connections = connectionManager.getActiveConnections()
+          .filter(c => c.mcpActive);
+
+        if (connections.length === 0) {
+          vscode.window.showInformationMessage('No hosts with Copilot access enabled');
+          return;
+        }
+
+        const picked = await vscode.window.showQuickPick(
+          connections.map(c => ({
+            label: c.config.name,
+            description: `${c.mountedDrive}:`,
+          })),
+          { placeHolder: 'Select host to disable Copilot access' }
+        );
+
+        if (picked) {
+          name = picked.label;
+        }
+      }
+
+      if (name) {
+        try {
+          await mcpManager.stopMcp(name);
+          treeProvider.refresh();
+          hostDetailsProvider?.refreshCurrentConnection();
+        } catch (error) {
+          vscode.window.showErrorMessage(`Failed to disable Copilot access: ${error}`);
+        }
+      }
+    })
+  );
+
+  // Toggle AI write access command
+  context.subscriptions.push(
+    vscode.commands.registerCommand('sftp-plus.toggleAiWrite', async (connectionName: string, filePath: string) => {
+      if (!mcpManager) {
+        return;
+      }
+
+      mcpManager.toggleAiWriteAccess(connectionName, filePath);
+      hostDetailsProvider?.refreshCurrentConnection();
+    })
+  );
+
+  // Allow AI write on folder command
+  context.subscriptions.push(
+    vscode.commands.registerCommand('sftp-plus.allowAiWriteFolder', async (connectionName: string, folderPath: string) => {
+      if (!mcpManager) {
+        return;
+      }
+
+      await mcpManager.allowAiWriteOnFolder(connectionName, folderPath);
+      hostDetailsProvider?.refreshCurrentConnection();
+    })
+  );
+
+  // Revoke AI write on folder command
+  context.subscriptions.push(
+    vscode.commands.registerCommand('sftp-plus.revokeAiWriteFolder', async (connectionName: string, folderPath: string) => {
+      if (!mcpManager) {
+        return;
+      }
+
+      await mcpManager.revokeAiWriteOnFolder(connectionName, folderPath);
+      hostDetailsProvider?.refreshCurrentConnection();
     })
   );
 }

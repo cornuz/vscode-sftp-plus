@@ -107,9 +107,9 @@ export class FileItem extends vscode.TreeItem {
     } else {
       this.iconPath = vscode.ThemeIcon.File;
       this.contextValue = 'file';
-      // Open file on click
+      // Open file on click (use custom command for non-preview mode)
       this.command = {
-        command: 'vscode.open',
+        command: 'sftp-plus.openRemoteFile',
         title: 'Open File',
         arguments: [this.resourceUri],
       };

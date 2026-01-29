@@ -6,12 +6,15 @@ import { ConnectionManager } from './services/connection.manager';
 import { RcloneService } from './services/rclone.service';
 import { PrerequisiteChecker } from './services/prerequisite.checker';
 import { CredentialManager } from './services/credential.manager';
+import { McpManager } from './mcp';
 import { registerCommands } from './commands';
 import { Logger } from './utils/logger';
+import { ConnectionStatus } from './models';
 
 // Store reference for deactivate
 let globalConnectionManager: ConnectionManager | undefined;
 let globalRcloneService: RcloneService | undefined;
+let globalMcpManager: McpManager | undefined;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   Logger.info('SFTP+ extension activating...');
@@ -43,6 +46,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   const statusBarProvider = new StatusBarProvider(connectionManager);
 
+  // Initialize MCP manager
+  const mcpManager = new McpManager(connectionManager);
+  globalMcpManager = mcpManager;
+
+  // Pass MCP manager to host details provider for AI toggle
+  hostDetailsProvider.setMcpManager(mcpManager);
+
   // Check prerequisites on startup (will update tree view)
   await prerequisiteChecker.checkAll();
 
@@ -59,14 +69,28 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
 
   // Register commands
-  registerCommands(context, connectionManager, treeProvider, prerequisiteChecker, hostDetailsProvider);
+  registerCommands(context, connectionManager, treeProvider, prerequisiteChecker, hostDetailsProvider, mcpManager);
 
   // Subscribe to connection changes
   connectionManager.onDidChangeConnections(() => {
     treeProvider.refresh();
     statusBarProvider.update();
 
+    // Stop MCP for connections that are no longer connected
+    for (const name of mcpManager.getActiveMcpConnections()) {
+      const conn = connectionManager.getConnection(name);
+      if (!conn || conn.status !== ConnectionStatus.Connected) {
+        mcpManager.stopMcp(name).catch(err => Logger.error(`Failed to stop MCP for ${name}`, err));
+      }
+    }
+
     // Update host details if current connection status changed
+    hostDetailsProvider.refreshCurrentConnection();
+  });
+
+  // Subscribe to MCP status changes
+  mcpManager.onDidChangeMcpStatus(() => {
+    treeProvider.refresh();
     hostDetailsProvider.refreshCurrentConnection();
   });
 
@@ -87,6 +111,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     await connectionManager.autoConnect();
   }
 
+  // Start health check for active connections
+  connectionManager.startHealthCheck();
+
   // Register disposables
   context.subscriptions.push(
     treeView,
@@ -94,6 +121,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     statusBarProvider,
     connectionManager,
     prerequisiteChecker,
+    mcpManager,
   );
 
   Logger.info('SFTP+ extension activated');
@@ -101,6 +129,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 export async function deactivate(): Promise<void> {
   Logger.info('SFTP+ extension deactivating...');
+
+  // Stop all MCP servers
+  if (globalMcpManager) {
+    globalMcpManager.dispose();
+  }
 
   // Disconnect all active connections
   if (globalConnectionManager) {

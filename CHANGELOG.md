@@ -2,6 +2,34 @@
 
 All notable changes to the SFTP+ extension will be documented in this file.
 
+## [0.1.5] - 2026-01-29
+
+### Fixed
+
+- **Critical: FTP/FTPS file sync issue** - Large files (>16KB) were not syncing to remote server
+  - Root cause: FTP servers rejecting `.partial` temporary files during TLS uploads
+  - Solution: Added `--inplace` flag to write directly to files without temporary files
+  - This fix applies to all protocols (SFTP, FTP, FTPS)
+
+### Added
+
+- **Connection health monitoring** - Detects when connections are lost and updates UI automatically
+  - Health check runs every 30 seconds via rclone RC API
+  - Shows warning notification with "Reconnect" option when connection is lost
+  - UI (tree view) updates immediately to reflect disconnected state
+
+### Changed
+
+- **Keep connections alive** - Changed default `idleTimeout` from `5m` to `0` (disabled)
+  - Connections now stay open as long as VS Code is running
+  - Can be overridden per-connection in settings if needed
+- Improved FTP/FTPS connection reliability with additional rclone options:
+  - `--inplace` - Write directly to files (all protocols)
+  - `--low-level-retries 10` - More retries for network issues (all protocols)
+  - `--ftp-disable-tls13` - Workaround for buggy TLS implementations
+  - `--ftp-close-timeout 30s` - Longer timeout for data connection closure
+  - `--ftp-shut-timeout 30s` - Longer timeout for connection close status
+
 ## [0.1.4] - 2026-01-12
 
 ### Fixed

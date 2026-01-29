@@ -1,8 +1,8 @@
 {
   "name": "sftp-plus",
-  "displayName": "SFTP+",
+  "displayName": "SFTP+ MCP",
   "description": "Full read/write access to SFTP/FTPS servers via rclone mount",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "publisher": "cornuz-design",
   "author": {
     "name": "Raphael Cornuz",
@@ -102,6 +102,153 @@
         "command": "sftp-plus.openInExplorer",
         "title": "SFTP+: Open in File Explorer",
         "icon": "$(folder-opened)"
+      },
+      {
+        "command": "sftp-plus.startMcp",
+        "title": "SFTP+: Enable Copilot Access",
+        "icon": "$(copilot)"
+      },
+      {
+        "command": "sftp-plus.stopMcp",
+        "title": "SFTP+: Disable Copilot Access",
+        "icon": "$(copilot)"
+      },
+      {
+        "command": "sftp-plus.toggleAiWrite",
+        "title": "SFTP+: Toggle AI Write Access",
+        "icon": "$(copilot)"
+      },
+      {
+        "command": "sftp-plus.allowAiWriteFolder",
+        "title": "SFTP+: Allow AI Write on Folder"
+      },
+      {
+        "command": "sftp-plus.revokeAiWriteFolder",
+        "title": "SFTP+: Revoke AI Write on Folder"
+      }
+    ],
+    "languageModelTools": [
+      {
+        "name": "sftp-plus_list_connections",
+        "displayName": "List Connections",
+        "toolReferenceName": "sftp-connections",
+        "icon": "$(tools)",
+        "modelDescription": "Lists all SFTP/FTP connections configured in SFTP+ extension and their MCP (Copilot access) status. Use this to discover available remote servers before accessing files.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {}
+        }
+      },
+      {
+        "name": "sftp-plus_list_files",
+        "displayName": "List Files",
+        "toolReferenceName": "sftp-ls",
+        "icon": "$(tools)",
+        "modelDescription": "Lists files and folders on a remote SFTP/FTP server. Requires the connection to have Copilot access enabled. Returns file names, types (file/folder), and paths.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "connectionName": {
+              "type": "string",
+              "description": "Name of the SFTP+ connection to use. Use sftp-plus_list_connections to see available connections."
+            },
+            "path": {
+              "type": "string",
+              "description": "Remote path to list. Use '/' for root or omit for the configured remote path. Example: '/var/www'"
+            }
+          },
+          "required": ["connectionName"]
+        }
+      },
+      {
+        "name": "sftp-plus_read_file",
+        "displayName": "Read File",
+        "toolReferenceName": "sftp-read",
+        "icon": "$(tools)",
+        "modelDescription": "Reads the content of a file from a remote SFTP/FTP server. Requires the connection to have Copilot access enabled. Returns the file content as text.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "connectionName": {
+              "type": "string",
+              "description": "Name of the SFTP+ connection to use."
+            },
+            "path": {
+              "type": "string",
+              "description": "Remote path to the file to read. Example: '/var/www/index.html'"
+            }
+          },
+          "required": ["connectionName", "path"]
+        }
+      },
+      {
+        "name": "sftp-plus_write_file",
+        "displayName": "Write File",
+        "toolReferenceName": "sftp-write",
+        "icon": "$(tools)",
+        "modelDescription": "Writes content to a file on a remote SFTP/FTP server. IMPORTANT: Requires BOTH Copilot access enabled on the connection AND explicit write permission granted by the user for the specific file/folder. If write access is denied, use sftp-plus_request_write_access to ask for permission.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "connectionName": {
+              "type": "string",
+              "description": "Name of the SFTP+ connection to use."
+            },
+            "path": {
+              "type": "string",
+              "description": "Remote path where to write the file. Example: '/var/www/config.json'"
+            },
+            "content": {
+              "type": "string",
+              "description": "Content to write to the file."
+            }
+          },
+          "required": ["connectionName", "path", "content"]
+        }
+      },
+      {
+        "name": "sftp-plus_list_writable_paths",
+        "displayName": "List Writable Paths",
+        "toolReferenceName": "sftp-writable",
+        "icon": "$(tools)",
+        "modelDescription": "Lists all files and folders that have write access enabled for AI on a specific SFTP+ connection. Use this before attempting to write to check permissions.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "connectionName": {
+              "type": "string",
+              "description": "Name of the SFTP+ connection to check."
+            }
+          },
+          "required": ["connectionName"]
+        }
+      },
+      {
+        "name": "sftp-plus_request_write_access",
+        "displayName": "Request Write Access",
+        "toolReferenceName": "sftp-request-write",
+        "icon": "$(tools)",
+        "modelDescription": "Requests write access for a specific file or folder on a remote server. This will show a notification to the user asking them to grant or deny write permission. Use this when sftp-plus_write_file fails due to missing permissions.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "connectionName": {
+              "type": "string",
+              "description": "Name of the SFTP+ connection."
+            },
+            "path": {
+              "type": "string",
+              "description": "Remote path to request write access for. Example: '/var/www/config.json'"
+            }
+          },
+          "required": ["connectionName", "path"]
+        }
       }
     ],
     "viewsContainers": {
@@ -154,37 +301,57 @@
         },
         {
           "command": "sftp-plus.disconnect",
-          "when": "view == sftp-plus.connections && viewItem == connected",
+          "when": "view == sftp-plus.connections && viewItem =~ /^connected(-mcp)?$/",
           "group": "inline"
         },
         {
           "command": "sftp-plus.openInExplorer",
+          "when": "view == sftp-plus.connections && viewItem =~ /^connected(-mcp)?$/",
+          "group": "inline"
+        },
+        {
+          "command": "sftp-plus.startMcp",
           "when": "view == sftp-plus.connections && viewItem == connected",
           "group": "inline"
         },
         {
+          "command": "sftp-plus.stopMcp",
+          "when": "view == sftp-plus.connections && viewItem == connected-mcp",
+          "group": "inline"
+        },
+        {
           "command": "sftp-plus.editConnection",
-          "when": "view == sftp-plus.connections && viewItem =~ /^(connected|disconnected)$/",
+          "when": "view == sftp-plus.connections && viewItem =~ /^(connected(-mcp)?|disconnected)$/",
           "group": "inline"
         },
         {
           "command": "sftp-plus.browseConnection",
-          "when": "view == sftp-plus.connections && viewItem == connected",
+          "when": "view == sftp-plus.connections && viewItem =~ /^connected(-mcp)?$/",
           "group": "1_open@1"
         },
         {
           "command": "sftp-plus.openInExplorer",
-          "when": "view == sftp-plus.connections && viewItem == connected",
+          "when": "view == sftp-plus.connections && viewItem =~ /^connected(-mcp)?$/",
           "group": "1_open@2"
         },
         {
+          "command": "sftp-plus.startMcp",
+          "when": "view == sftp-plus.connections && viewItem == connected",
+          "group": "1_open@3"
+        },
+        {
+          "command": "sftp-plus.stopMcp",
+          "when": "view == sftp-plus.connections && viewItem == connected-mcp",
+          "group": "1_open@3"
+        },
+        {
           "command": "sftp-plus.editConnection",
-          "when": "view == sftp-plus.connections && viewItem =~ /^(connected|disconnected)$/",
+          "when": "view == sftp-plus.connections && viewItem =~ /^(connected(-mcp)?|disconnected)$/",
           "group": "2_modify"
         },
         {
           "command": "sftp-plus.removeConnection",
-          "when": "view == sftp-plus.connections && viewItem =~ /^(connected|disconnected)$/",
+          "when": "view == sftp-plus.connections && viewItem =~ /^(connected(-mcp)?|disconnected)$/",
           "group": "3_remove"
         }
       ]
@@ -263,8 +430,8 @@
               },
               "idleTimeout": {
                 "type": "string",
-                "default": "5m",
-                "description": "Keep-alive idle timeout"
+                "default": "0",
+                "description": "Keep-alive idle timeout (0 = disabled, stays connected)"
               }
             },
             "required": [

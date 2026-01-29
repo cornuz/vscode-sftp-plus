@@ -4,6 +4,7 @@ import * as path from 'path';
 import { Connection, ConnectionConfig, ConnectionStatus, ConnectionScope, PasswordSource, DEFAULT_CONNECTION_CONFIG, InstallStatus, SyncStatus } from '../models';
 import { ConnectionManager } from '../services/connection.manager';
 import { TrackingService, TrackedFileWithContext } from '../services/tracking.service';
+import { McpManager } from '../mcp';
 import { Logger } from '../utils/logger';
 
 /**
@@ -46,12 +47,24 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
   private _prerequisiteStatusListener?: vscode.Disposable;
   private readonly _trackingService: TrackingService;
   private _autoRefreshTimer?: ReturnType<typeof setInterval>; // Timer for auto-refresh
+  private _mcpManager?: McpManager; // MCP manager for AI write access
 
   constructor(
     private readonly _extensionUri: vscode.Uri,
     private readonly _connectionManager: ConnectionManager
   ) {
     this._trackingService = new TrackingService();
+  }
+
+  /**
+   * Set the MCP manager for AI write toggle functionality
+   */
+  setMcpManager(mcpManager: McpManager): void {
+    this._mcpManager = mcpManager;
+    // Subscribe to AI permission changes to refresh the view
+    mcpManager.onDidChangeAiPermissions(() => {
+      this._updateView();
+    });
   }
 
   /**
@@ -188,9 +201,15 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
         this._currentTab = 'settings';
         this._currentPath = undefined;
       } else if (!wasConnected && isNowConnected && freshConnection.mountedDrive) {
-        // Just connected: switch to Files
+        // Just connected: switch to Files and set path
         this._currentTab = 'files';
         this._currentPath = `${freshConnection.mountedDrive}:\\`;
+      } else if (isNowConnected && freshConnection.mountedDrive && this._currentTab === 'settings') {
+        // Already connected but still on settings tab: switch to Files
+        this._currentTab = 'files';
+        if (!this._currentPath) {
+          this._currentPath = `${freshConnection.mountedDrive}:\\`;
+        }
       }
 
       // Reload password (may have been deleted or changed)
@@ -275,8 +294,18 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
           break;
 
         case 'openFile':
-          const uri = vscode.Uri.file(message.path);
-          await vscode.commands.executeCommand('vscode.open', uri);
+          if (message.paths && Array.isArray(message.paths)) {
+            // Multi-file open
+            for (const filePath of message.paths) {
+              const fileUri = vscode.Uri.file(filePath);
+              const doc = await vscode.workspace.openTextDocument(fileUri);
+              await vscode.window.showTextDocument(doc, { preview: false });
+            }
+          } else {
+            const fileUri = vscode.Uri.file(message.path);
+            const doc = await vscode.workspace.openTextDocument(fileUri);
+            await vscode.window.showTextDocument(doc, { preview: false });
+          }
           break;
 
         case 'selectFile':
@@ -285,15 +314,49 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
           break;
 
         case 'downloadFile':
-          await this._downloadFile(message.path);
+          if (message.paths && Array.isArray(message.paths)) {
+            for (const filePath of message.paths) {
+              await this._downloadFile(filePath);
+            }
+          } else {
+            await this._downloadFile(message.path);
+          }
           break;
 
         case 'trackFile':
-          await this._trackFile(message.path);
+          if (message.paths && Array.isArray(message.paths)) {
+            for (const filePath of message.paths) {
+              await this._trackFile(filePath);
+            }
+          } else {
+            await this._trackFile(message.path);
+          }
           break;
 
         case 'untrackFile':
-          await this._untrackFile(message.path);
+          if (message.paths && Array.isArray(message.paths)) {
+            for (const filePath of message.paths) {
+              await this._untrackFile(filePath);
+            }
+          } else {
+            await this._untrackFile(message.path);
+          }
+          break;
+
+        case 'renameFile':
+          await this._renameFile(message.path);
+          break;
+
+        case 'duplicateFile':
+          await this._duplicateFile(message.path);
+          break;
+
+        case 'deleteFile':
+          if (message.paths && Array.isArray(message.paths)) {
+            await this._deleteFiles(message.paths);
+          } else {
+            await this._deleteFile(message.path);
+          }
           break;
 
         case 'refresh':
@@ -333,6 +396,27 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
             await vscode.commands.executeCommand('sftp-plus.installRclone');
           } else if (message.name === 'WinFsp') {
             await vscode.commands.executeCommand('sftp-plus.installWinFsp');
+          }
+          break;
+
+        case 'toggleAiWrite':
+          // Toggle AI write access for a file/folder
+          if (this._mcpManager && this._currentConnection) {
+            this._mcpManager.toggleAiWriteAccess(this._currentConnection.config.name, message.path);
+          }
+          break;
+
+        case 'allowAiWriteFolder':
+          // Allow AI write on folder
+          if (this._mcpManager && this._currentConnection) {
+            await this._mcpManager.allowAiWriteOnFolder(this._currentConnection.config.name, message.path);
+          }
+          break;
+
+        case 'revokeAiWriteFolder':
+          // Revoke AI write on folder
+          if (this._mcpManager && this._currentConnection) {
+            await this._mcpManager.revokeAiWriteOnFolder(this._currentConnection.config.name, message.path);
           }
           break;
 
@@ -945,6 +1029,37 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
       color: var(--vscode-list-activeSelectionForeground);
     }
 
+    /* AI Toggle Icons */
+    .ai-toggle {
+      flex-shrink: 0;
+      width: 20px;
+      text-align: center;
+      cursor: pointer;
+      padding: 0 2px;
+      border-radius: 3px;
+      margin-left: 4px;
+    }
+    .ai-toggle:hover {
+      background: var(--vscode-toolbar-hoverBackground);
+    }
+    .ai-toggle.ai-readonly {
+      color: var(--vscode-descriptionForeground);
+      opacity: 0.5;
+    }
+    .ai-toggle.ai-readonly:hover {
+      opacity: 1;
+    }
+    .ai-toggle.ai-writable {
+      color: var(--vscode-charts-orange, #cca700);
+    }
+    .file-item.selected .ai-toggle.ai-readonly {
+      color: var(--vscode-list-activeSelectionForeground);
+      opacity: 0.5;
+    }
+    .file-item.selected .ai-toggle.ai-writable {
+      color: var(--vscode-charts-orange, #cca700);
+    }
+
     /* Context Menu */
     .context-menu {
       position: fixed;
@@ -1301,6 +1416,19 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
             <span>Download</span>
           </div>
           <div class="context-menu-separator"></div>
+          <div class="context-menu-item" data-action="rename">
+            <span class="codicon codicon-pencil"></span>
+            <span>Rename</span>
+          </div>
+          <div class="context-menu-item" data-action="duplicate">
+            <span class="codicon codicon-copy"></span>
+            <span>Duplicate</span>
+          </div>
+          <div class="context-menu-item" data-action="delete">
+            <span class="codicon codicon-trash"></span>
+            <span>Delete</span>
+          </div>
+          <div class="context-menu-separator"></div>
           <div class="context-menu-item" data-action="track" id="trackMenuItem">
             <span class="codicon codicon-eye"></span>
             <span>Track this file</span>
@@ -1371,6 +1499,9 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
         const wasExpandedBeforeFilter = this._foldersExpandedBeforeFilter.has(fullPath);
         const indent = depth * 16; // 16px per level
 
+        // Get AI toggle icon (only shown when MCP is active)
+        const aiToggleIcon = this._getAiToggleIcon(fullPath);
+
         if (isDir) {
           const chevronClass = isExpanded ? 'codicon-chevron-down' : 'codicon-chevron-right';
 
@@ -1378,6 +1509,7 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
             <li class="file-item" data-action="toggle" data-path="${this._escapeHtml(fullPath)}" style="padding-left: ${indent}px;">
               <span class="chevron codicon ${chevronClass}"></span>
               <span class="name">${this._escapeHtml(entry.name)}</span>
+              ${aiToggleIcon}
             </li>
           `;
 
@@ -1435,7 +1567,7 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
               <span class="chevron-spacer"></span>
               <span class="icon"><span class="codicon ${iconClass}"></span></span>
               <span class="name">${this._escapeHtml(entry.name)}</span>
-              ${dateHtml}${sizeHtml}${trackingIcon}
+              ${dateHtml}${sizeHtml}${trackingIcon}${aiToggleIcon}
             </li>
           `;
         }
@@ -1443,6 +1575,42 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
     } catch (error) {
       return `<li class="file-item" style="color: var(--vscode-errorForeground)"><span class="codicon codicon-error"></span> Error reading directory</li>`;
     }
+  }
+
+  /**
+   * Check if MCP is active for the current connection
+   */
+  private _isMcpActive(): boolean {
+    if (!this._mcpManager || !this._currentConnection) {
+      return false;
+    }
+    return this._currentConnection.mcpActive === true;
+  }
+
+  /**
+   * Check if a path has AI write access
+   */
+  private _isAiWritable(filePath: string): boolean {
+    if (!this._mcpManager || !this._currentConnection) {
+      return false;
+    }
+    return this._mcpManager.isAiWritable(this._currentConnection.config.name, filePath);
+  }
+
+  /**
+   * Get the AI toggle icon HTML for a file/folder
+   */
+  private _getAiToggleIcon(filePath: string): string {
+    if (!this._isMcpActive()) {
+      return ''; // No icon if MCP is not active
+    }
+
+    const isWritable = this._isAiWritable(filePath);
+    const iconClass = isWritable ? 'codicon-copilot-warning' : 'codicon-copilot';
+    const colorClass = isWritable ? 'ai-writable' : 'ai-readonly';
+    const title = isWritable ? 'AI can write (click to revoke)' : 'AI read-only (click to allow write)';
+
+    return `<span class="ai-toggle ${colorClass}" data-action="toggleAiWrite" data-path="${this._escapeHtml(filePath)}" title="${title}"><span class="codicon ${iconClass}"></span></span>`;
   }
 
   /**
@@ -1541,6 +1709,216 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
       // Refresh view to remove tracking indicator
       this._updateView();
     }
+  }
+
+  /**
+   * Rename a file or folder
+   */
+  private async _renameFile(filePath: string): Promise<void> {
+    const currentName = path.basename(filePath);
+    const isDirectory = fs.statSync(filePath).isDirectory();
+
+    const newName = await vscode.window.showInputBox({
+      prompt: `Enter new name for ${isDirectory ? 'folder' : 'file'}`,
+      value: currentName,
+      validateInput: (value) => {
+        if (!value || value.trim().length === 0) {
+          return 'Name cannot be empty';
+        }
+        if (value.includes('/') || value.includes('\\')) {
+          return 'Name cannot contain path separators';
+        }
+        return undefined;
+      }
+    });
+
+    if (!newName || newName === currentName) {
+      return;
+    }
+
+    try {
+      const dirPath = path.dirname(filePath);
+      const newPath = path.join(dirPath, newName);
+
+      // Check if target already exists
+      if (fs.existsSync(newPath)) {
+        vscode.window.showErrorMessage(`A ${isDirectory ? 'folder' : 'file'} with that name already exists`);
+        return;
+      }
+
+      fs.renameSync(filePath, newPath);
+      vscode.window.showInformationMessage(`Renamed to "${newName}"`);
+      this._updateView();
+    } catch (error) {
+      Logger.error('Failed to rename', error);
+      vscode.window.showErrorMessage(`Failed to rename: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  /**
+   * Duplicate a file or folder
+   */
+  private async _duplicateFile(filePath: string): Promise<void> {
+    const currentName = path.basename(filePath);
+    const isDirectory = fs.statSync(filePath).isDirectory();
+    const ext = path.extname(currentName);
+    const nameWithoutExt = ext ? currentName.slice(0, -ext.length) : currentName;
+    const suggestedName = `${nameWithoutExt} (copy)${ext}`;
+
+    const newName = await vscode.window.showInputBox({
+      prompt: `Enter name for the duplicate ${isDirectory ? 'folder' : 'file'}`,
+      value: suggestedName,
+      validateInput: (value) => {
+        if (!value || value.trim().length === 0) {
+          return 'Name cannot be empty';
+        }
+        if (value.includes('/') || value.includes('\\')) {
+          return 'Name cannot contain path separators';
+        }
+        return undefined;
+      }
+    });
+
+    if (!newName) {
+      return;
+    }
+
+    try {
+      const dirPath = path.dirname(filePath);
+      const newPath = path.join(dirPath, newName);
+
+      // Check if target already exists
+      if (fs.existsSync(newPath)) {
+        vscode.window.showErrorMessage(`A ${isDirectory ? 'folder' : 'file'} with that name already exists`);
+        return;
+      }
+
+      if (isDirectory) {
+        // Recursively copy directory
+        this._copyDirectorySync(filePath, newPath);
+      } else {
+        fs.copyFileSync(filePath, newPath);
+      }
+
+      vscode.window.showInformationMessage(`Created "${newName}"`);
+      this._updateView();
+    } catch (error) {
+      Logger.error('Failed to duplicate', error);
+      vscode.window.showErrorMessage(`Failed to duplicate: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  /**
+   * Recursively copy a directory
+   */
+  private _copyDirectorySync(src: string, dest: string): void {
+    fs.mkdirSync(dest, { recursive: true });
+    const entries = fs.readdirSync(src, { withFileTypes: true });
+
+    for (const entry of entries) {
+      const srcPath = path.join(src, entry.name);
+      const destPath = path.join(dest, entry.name);
+
+      if (entry.isDirectory()) {
+        this._copyDirectorySync(srcPath, destPath);
+      } else {
+        fs.copyFileSync(srcPath, destPath);
+      }
+    }
+  }
+
+  /**
+   * Delete a file or folder
+   */
+  private async _deleteFile(filePath: string): Promise<void> {
+    const fileName = path.basename(filePath);
+    const isDirectory = fs.statSync(filePath).isDirectory();
+
+    const confirm = await vscode.window.showWarningMessage(
+      `Are you sure you want to delete "${fileName}"?${isDirectory ? ' This will delete all contents.' : ''}`,
+      { modal: true },
+      'Delete'
+    );
+
+    if (confirm !== 'Delete') {
+      return;
+    }
+
+    try {
+      if (isDirectory) {
+        fs.rmSync(filePath, { recursive: true, force: true });
+      } else {
+        fs.unlinkSync(filePath);
+      }
+
+      vscode.window.showInformationMessage(`Deleted "${fileName}"`);
+      this._updateView();
+    } catch (error) {
+      Logger.error('Failed to delete', error);
+      vscode.window.showErrorMessage(`Failed to delete: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  /**
+   * Delete multiple files/folders with single confirmation
+   */
+  private async _deleteFiles(filePaths: string[]): Promise<void> {
+    if (filePaths.length === 0) return;
+
+    // Count files and folders
+    let fileCount = 0;
+    let folderCount = 0;
+    for (const filePath of filePaths) {
+      try {
+        if (fs.statSync(filePath).isDirectory()) {
+          folderCount++;
+        } else {
+          fileCount++;
+        }
+      } catch {
+        // File may not exist, skip
+      }
+    }
+
+    const itemDescription = [];
+    if (fileCount > 0) itemDescription.push(`${fileCount} file${fileCount > 1 ? 's' : ''}`);
+    if (folderCount > 0) itemDescription.push(`${folderCount} folder${folderCount > 1 ? 's' : ''}`);
+
+    const confirm = await vscode.window.showWarningMessage(
+      `Are you sure you want to delete ${itemDescription.join(' and ')}?${folderCount > 0 ? ' Folders will be deleted with all their contents.' : ''}`,
+      { modal: true },
+      'Delete'
+    );
+
+    if (confirm !== 'Delete') {
+      return;
+    }
+
+    let deletedCount = 0;
+    let errorCount = 0;
+
+    for (const filePath of filePaths) {
+      try {
+        const isDirectory = fs.statSync(filePath).isDirectory();
+        if (isDirectory) {
+          fs.rmSync(filePath, { recursive: true, force: true });
+        } else {
+          fs.unlinkSync(filePath);
+        }
+        deletedCount++;
+      } catch (error) {
+        Logger.error(`Failed to delete ${filePath}`, error);
+        errorCount++;
+      }
+    }
+
+    if (errorCount === 0) {
+      vscode.window.showInformationMessage(`Deleted ${deletedCount} item${deletedCount > 1 ? 's' : ''}`);
+    } else {
+      vscode.window.showWarningMessage(`Deleted ${deletedCount} item${deletedCount > 1 ? 's' : ''}, ${errorCount} failed`);
+    }
+
+    this._updateView();
   }
 
   /**
@@ -1750,49 +2128,155 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
         vscode.postMessage({ command: 'openExternal', url });
       });
 
+      // AI toggle click handler
+      document.querySelectorAll('.ai-toggle').forEach(toggle => {
+        toggle.addEventListener('click', (e) => {
+          e.stopPropagation(); // Prevent file/folder selection
+          const filePath = toggle.dataset.path;
+          vscode.postMessage({ command: 'toggleAiWrite', path: filePath });
+        });
+      });
+
+      // Track selected files for multi-selection
+      let selectedFiles = [];
+
+      // Helper to get all selected file paths
+      function getSelectedFilePaths() {
+        return Array.from(document.querySelectorAll('.file-item.selected'))
+          .map(el => el.dataset.path)
+          .filter(p => p);
+      }
+
+      // Helper to check if all selected items are files (not folders)
+      function areAllSelectedFiles() {
+        return Array.from(document.querySelectorAll('.file-item.selected'))
+          .every(el => el.dataset.action === 'select');
+      }
+
       document.querySelectorAll('.file-item').forEach(item => {
-        item.addEventListener('click', () => {
+        item.addEventListener('click', (e) => {
+          // Don't handle if click was on AI toggle
+          if (e.target.closest('.ai-toggle')) return;
+
           const action = item.dataset.action;
           const filePath = item.dataset.path;
           if (action === 'toggle') {
+            // Clear selection when toggling folder
+            if (!e.ctrlKey && !e.metaKey) {
+              document.querySelectorAll('.file-item.selected').forEach(el => el.classList.remove('selected'));
+            }
             vscode.postMessage({ command: 'toggleFolder', path: filePath });
           } else if (action === 'navigate') {
             vscode.postMessage({ command: 'navigateTo', path: filePath });
           } else if (action === 'select') {
-            // Select file (update visual state)
-            document.querySelectorAll('.file-item.selected').forEach(el => el.classList.remove('selected'));
-            item.classList.add('selected');
+            // Multi-select with Ctrl/Cmd key
+            if (e.ctrlKey || e.metaKey) {
+              // Toggle selection
+              item.classList.toggle('selected');
+            } else {
+              // Single select - clear others
+              document.querySelectorAll('.file-item.selected').forEach(el => el.classList.remove('selected'));
+              item.classList.add('selected');
+            }
             vscode.postMessage({ command: 'selectFile', path: filePath });
           }
         });
 
-        // Right-click context menu for files
+        // Right-click context menu for files and folders
         item.addEventListener('contextmenu', (e) => {
           const action = item.dataset.action;
-          if (action !== 'select') return; // Only for files, not folders
+          const isFile = action === 'select';
+          const isFolder = action === 'toggle';
+
+          // Only for files and folders, not navigation items
+          if (!isFile && !isFolder) return;
 
           e.preventDefault();
           const filePath = item.dataset.path;
           const isTracked = item.classList.contains('tracked');
 
-          // Select the file first
-          document.querySelectorAll('.file-item.selected').forEach(el => el.classList.remove('selected'));
-          item.classList.add('selected');
-          vscode.postMessage({ command: 'selectFile', path: filePath });
+          // If right-clicking on an unselected item, select only that item
+          // If right-clicking on a selected item, keep all selections
+          if (!item.classList.contains('selected')) {
+            document.querySelectorAll('.file-item.selected').forEach(el => el.classList.remove('selected'));
+            item.classList.add('selected');
+            if (isFile) {
+              vscode.postMessage({ command: 'selectFile', path: filePath });
+            }
+          }
 
-          // Show/hide track/untrack menu items
+          // Get all selected paths
+          const selectedPaths = getSelectedFilePaths();
+          const multiSelect = selectedPaths.length > 1;
+          const allFiles = areAllSelectedFiles();
+
+          // Show/hide menu items based on selection
+          const cloudEditItem = document.querySelector('[data-action="cloudEdit"]');
+          const downloadItem = document.querySelector('[data-action="download"]');
+          const renameItem = document.querySelector('[data-action="rename"]');
+          const duplicateItem = document.querySelector('[data-action="duplicate"]');
           const trackItem = document.getElementById('trackMenuItem');
           const untrackItem = document.getElementById('untrackMenuItem');
-          if (trackItem) trackItem.style.display = isTracked ? 'none' : 'flex';
-          if (untrackItem) untrackItem.style.display = isTracked ? 'flex' : 'none';
+
+          // Cloud Edit, Download: only for files (single or multi)
+          if (cloudEditItem) cloudEditItem.style.display = allFiles ? 'flex' : 'none';
+          if (downloadItem) downloadItem.style.display = allFiles ? 'flex' : 'none';
+
+          // Rename, Duplicate: only for single selection
+          if (renameItem) renameItem.style.display = (!multiSelect) ? 'flex' : 'none';
+          if (duplicateItem) duplicateItem.style.display = (!multiSelect) ? 'flex' : 'none';
+
+          // Track/Untrack: only for files
+          if (trackItem) trackItem.style.display = (allFiles && !isTracked) ? 'flex' : 'none';
+          if (untrackItem) untrackItem.style.display = (allFiles && isTracked) ? 'flex' : 'none';
+
+          // Update menu item labels for multi-select
+          if (cloudEditItem) {
+            cloudEditItem.querySelector('span:last-child').textContent = multiSelect ? 'Cloud Edit (' + selectedPaths.length + ')' : 'Cloud Edit';
+          }
+          if (downloadItem) {
+            downloadItem.querySelector('span:last-child').textContent = multiSelect ? 'Download (' + selectedPaths.length + ')' : 'Download';
+          }
+          const deleteItem = document.querySelector('[data-action="delete"]');
+          if (deleteItem) {
+            deleteItem.querySelector('span:last-child').textContent = multiSelect ? 'Delete (' + selectedPaths.length + ')' : 'Delete';
+          }
+          if (trackItem) {
+            trackItem.querySelector('span:last-child').textContent = multiSelect ? 'Track (' + selectedPaths.length + ')' : 'Track this file';
+          }
+          if (untrackItem) {
+            untrackItem.querySelector('span:last-child').textContent = multiSelect ? 'Untrack (' + selectedPaths.length + ')' : 'Untrack this file';
+          }
 
           // Show context menu
           const menu = document.getElementById('contextMenu');
           if (menu) {
-            menu.style.left = e.clientX + 'px';
-            menu.style.top = e.clientY + 'px';
+            // First, make menu visible but off-screen to calculate its height
+            menu.style.left = '-9999px';
+            menu.style.top = '-9999px';
             menu.classList.add('visible');
+
+            // Get menu height and viewport dimensions
+            const menuHeight = menu.offsetHeight;
+            const viewportHeight = window.innerHeight;
+            const clickY = e.clientY;
+
+            // Determine if menu should open upward or downward
+            // If click is in bottom half, open upward
+            const openUpward = clickY > viewportHeight / 2;
+
+            // Position menu
+            menu.style.left = e.clientX + 'px';
+            if (openUpward) {
+              // Open upward: position bottom of menu at click position
+              menu.style.top = (clickY - menuHeight) + 'px';
+            } else {
+              // Open downward: position top of menu at click position
+              menu.style.top = clickY + 'px';
+            }
+
             menu.dataset.filePath = filePath;
+            menu.dataset.selectedPaths = JSON.stringify(selectedPaths);
           }
         });
       });
@@ -1804,16 +2288,44 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
           menuItem.addEventListener('click', () => {
             const action = menuItem.dataset.action;
             const filePath = contextMenu.dataset.filePath;
+            const selectedPaths = JSON.parse(contextMenu.dataset.selectedPaths || '[]');
+            const isMultiSelect = selectedPaths.length > 1;
             contextMenu.classList.remove('visible');
 
             if (action === 'cloudEdit') {
-              vscode.postMessage({ command: 'openFile', path: filePath });
+              if (isMultiSelect) {
+                vscode.postMessage({ command: 'openFile', paths: selectedPaths });
+              } else {
+                vscode.postMessage({ command: 'openFile', path: filePath });
+              }
             } else if (action === 'download') {
-              vscode.postMessage({ command: 'downloadFile', path: filePath });
+              if (isMultiSelect) {
+                vscode.postMessage({ command: 'downloadFile', paths: selectedPaths });
+              } else {
+                vscode.postMessage({ command: 'downloadFile', path: filePath });
+              }
+            } else if (action === 'rename') {
+              vscode.postMessage({ command: 'renameFile', path: filePath });
+            } else if (action === 'duplicate') {
+              vscode.postMessage({ command: 'duplicateFile', path: filePath });
+            } else if (action === 'delete') {
+              if (isMultiSelect) {
+                vscode.postMessage({ command: 'deleteFile', paths: selectedPaths });
+              } else {
+                vscode.postMessage({ command: 'deleteFile', path: filePath });
+              }
             } else if (action === 'track') {
-              vscode.postMessage({ command: 'trackFile', path: filePath });
+              if (isMultiSelect) {
+                vscode.postMessage({ command: 'trackFile', paths: selectedPaths });
+              } else {
+                vscode.postMessage({ command: 'trackFile', path: filePath });
+              }
             } else if (action === 'untrack') {
-              vscode.postMessage({ command: 'untrackFile', path: filePath });
+              if (isMultiSelect) {
+                vscode.postMessage({ command: 'untrackFile', paths: selectedPaths });
+              } else {
+                vscode.postMessage({ command: 'untrackFile', path: filePath });
+              }
             }
           });
         });

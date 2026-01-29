@@ -25,6 +25,11 @@ export class ConnectionManager implements vscode.Disposable {
   private _onDidChangeConnections = new vscode.EventEmitter<void>();
   readonly onDidChangeConnections = this._onDidChangeConnections.event;
 
+  /** Health check interval handle */
+  private healthCheckInterval?: ReturnType<typeof setInterval>;
+  /** Health check interval in milliseconds (default: 30 seconds) */
+  private static readonly HEALTH_CHECK_INTERVAL_MS = 30000;
+
   private static readonly WORKSPACE_CONFIG_FILE = '.vscode/sftp_plus.json';
 
   constructor(
@@ -171,6 +176,81 @@ export class ConnectionManager implements vscode.Disposable {
   }
 
   /**
+   * Start the health check interval to monitor active connections
+   * Checks every 30 seconds if mounted drives are still alive
+   */
+  startHealthCheck(): void {
+    if (this.healthCheckInterval) {
+      return; // Already running
+    }
+
+    this.healthCheckInterval = setInterval(async () => {
+      await this.checkConnectionsHealth();
+    }, ConnectionManager.HEALTH_CHECK_INTERVAL_MS);
+
+    Logger.info('Connection health check started (30s interval)');
+  }
+
+  /**
+   * Stop the health check interval
+   */
+  stopHealthCheck(): void {
+    if (this.healthCheckInterval) {
+      clearInterval(this.healthCheckInterval);
+      this.healthCheckInterval = undefined;
+      Logger.info('Connection health check stopped');
+    }
+  }
+
+  /**
+   * Check health of all active connections
+   * Marks connections as disconnected if they're no longer responding
+   */
+  private async checkConnectionsHealth(): Promise<void> {
+    const activeConnections = this.getActiveConnections();
+
+    if (activeConnections.length === 0) {
+      return;
+    }
+
+    let hasChanges = false;
+
+    for (const connection of activeConnections) {
+      if (!connection.rcPort) {
+        continue;
+      }
+
+      const isAlive = await this.rcloneService.isConnectionAlive(connection.rcPort);
+
+      if (!isAlive) {
+        Logger.warn(`Connection "${connection.config.name}" is no longer responding`);
+
+        // Mark as disconnected
+        connection.status = ConnectionStatus.Disconnected;
+        connection.mountedDrive = undefined;
+        connection.processId = undefined;
+        connection.rcPort = undefined;
+        connection.error = 'Connection lost';
+        hasChanges = true;
+
+        // Notify user
+        vscode.window.showWarningMessage(
+          `SFTP+: Connection to "${connection.config.name}" was lost`,
+          'Reconnect'
+        ).then(selection => {
+          if (selection === 'Reconnect') {
+            vscode.commands.executeCommand('sftp-plus.connect', connection.config.name);
+          }
+        });
+      }
+    }
+
+    if (hasChanges) {
+      this._onDidChangeConnections.fire();
+    }
+  }
+
+  /**
    * Save workspace configuration to JSON file
    */
   private async saveWorkspaceConfigs(configs: ConnectionConfig[]): Promise<void> {
@@ -217,6 +297,13 @@ export class ConnectionManager implements vscode.Disposable {
    */
   getActiveConnections(): Connection[] {
     return this.getConnections().filter(c => c.status === ConnectionStatus.Connected);
+  }
+
+  /**
+   * Get the rclone service instance
+   */
+  getRcloneService(): RcloneService {
+    return this.rcloneService;
   }
 
   /**
@@ -306,8 +393,8 @@ export class ConnectionManager implements vscode.Disposable {
         throw new Error('No available drive letters');
       }
 
-      // Start mount
-      const process = this.rcloneService.mount(connection.config, obscuredPassword, driveLetter);
+      // Start mount (returns process and RC port)
+      const { process, rcPort } = this.rcloneService.mount(connection.config, obscuredPassword, driveLetter);
 
       // Wait for mount to be ready
       const mounted = await this.waitForMount(driveLetter, 15000);
@@ -318,8 +405,10 @@ export class ConnectionManager implements vscode.Disposable {
       connection.status = ConnectionStatus.Connected;
       connection.mountedDrive = driveLetter;
       connection.processId = process.pid;
+      connection.rcPort = rcPort;
+      connection.obscuredPassword = obscuredPassword;  // Store for direct sync
 
-      Logger.info(`Connected to ${name} on ${driveLetter}:`);
+      Logger.info(`Connected to ${name} on ${driveLetter}: (RC port: ${rcPort})`);
       vscode.window.showInformationMessage(`SFTP+: Connected to ${name} (${driveLetter}:)`);
 
     } catch (error) {
@@ -346,9 +435,16 @@ export class ConnectionManager implements vscode.Disposable {
       return;
     }
 
+    const mountedDrive = connection.mountedDrive;
+
     try {
       connection.status = ConnectionStatus.Disconnecting;
       this._onDidChangeConnections.fire();
+
+      // Close all editors that have files on this mounted drive
+      if (mountedDrive) {
+        await this.closeEditorsOnDrive(mountedDrive);
+      }
 
       if (connection.processId) {
         await this.rcloneService.unmount(connection.processId);
@@ -381,6 +477,33 @@ export class ConnectionManager implements vscode.Disposable {
     }
 
     Logger.info(`Disconnected all (${activeConnections.length}) connections`);
+  }
+
+  /**
+   * Close all editors that have files on a specific mounted drive
+   */
+  private async closeEditorsOnDrive(driveLetter: string): Promise<void> {
+    const drivePath = `${driveLetter.toUpperCase()}:\\`;
+
+    // Get all tab groups and their tabs
+    for (const tabGroup of vscode.window.tabGroups.all) {
+      for (const tab of tabGroup.tabs) {
+        // Check if tab has a URI (it's a file tab)
+        const tabInput = tab.input as { uri?: vscode.Uri } | undefined;
+        if (tabInput?.uri?.fsPath) {
+          const filePath = tabInput.uri.fsPath.toUpperCase();
+          if (filePath.startsWith(drivePath)) {
+            // Close this tab
+            try {
+              await vscode.window.tabGroups.close(tab);
+              Logger.debug(`Closed editor: ${tabInput.uri.fsPath}`);
+            } catch (error) {
+              Logger.debug(`Failed to close editor: ${tabInput.uri.fsPath}`);
+            }
+          }
+        }
+      }
+    }
   }
 
   /**
@@ -653,6 +776,8 @@ export class ConnectionManager implements vscode.Disposable {
   }
 
   dispose(): void {
+    // Stop health check
+    this.stopHealthCheck();
     // Disconnect all on dispose
     this.disconnectAll();
     this._onDidChangeConnections.dispose();

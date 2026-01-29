@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { ConnectionManager } from '../services/connection.manager';
+import { Logger } from '../utils/logger';
 
 /**
  * Status bar provider showing active connection count and cloud file indicator
@@ -8,6 +9,7 @@ export class StatusBarProvider implements vscode.Disposable {
   private statusBarItem: vscode.StatusBarItem;
   private cloudFileIndicator: vscode.StatusBarItem;
   private editorChangeListener: vscode.Disposable;
+  private saveListener: vscode.Disposable;
 
   constructor(private connectionManager: ConnectionManager) {
     this.statusBarItem = vscode.window.createStatusBarItem(
@@ -30,6 +32,11 @@ export class StatusBarProvider implements vscode.Disposable {
     // Listen for active editor changes
     this.editorChangeListener = vscode.window.onDidChangeActiveTextEditor((editor) => {
       this._updateCloudFileIndicator(editor);
+    });
+
+    // Listen for file saves to show notification for cloud files
+    this.saveListener = vscode.workspace.onDidSaveTextDocument((document) => {
+      this._onCloudFileSaved(document);
     });
 
     // Check current editor
@@ -84,6 +91,72 @@ export class StatusBarProvider implements vscode.Disposable {
   }
 
   /**
+   * Show notification when a cloud file is saved and trigger sync.
+   * Since VFS queue doesn't work with open files, we use direct rclone copy.
+   */
+  private async _onCloudFileSaved(document: vscode.TextDocument): Promise<void> {
+    const filePath = document.uri.fsPath;
+    const filePathUpper = filePath.toUpperCase();
+    const activeConnections = this.connectionManager.getActiveConnections();
+
+    const connection = activeConnections.find(conn => {
+      if (conn.mountedDrive) {
+        return filePathUpper.startsWith(`${conn.mountedDrive.toUpperCase()}:\\`);
+      }
+      return false;
+    });
+
+    if (connection && connection.mountedDrive && connection.rcPort) {
+      const fileName = filePath.split(/[\\/]/).pop() || 'file';
+      const rcloneService = this.connectionManager.getRcloneService();
+
+      // Update the status bar to show syncing
+      this.cloudFileIndicator.text = `$(sync~spin) Syncing...`;
+      this.cloudFileIndicator.tooltip = `Syncing ${fileName} to ${connection.config.name}...`;
+
+      try {
+        // First try VFS queue approach
+        const syncResult = await rcloneService.flushVfsCache(connection.rcPort, filePath);
+
+        // If VFS queue didn't work (file open in editor), use direct CLI copy
+        if (!syncResult.uploaded) {
+          Logger.info(`[DirectSync] VFS queue empty, trying direct rclone copy...`);
+
+          const directSuccess = await rcloneService.directSyncFile(
+            filePath,
+            connection.mountedDrive,
+            connection.config,
+            connection.obscuredPassword
+          );
+
+          if (directSuccess) {
+            this._updateCloudFileIndicator(vscode.window.activeTextEditor);
+            vscode.window.setStatusBarMessage(`$(cloud-upload) ${fileName} synced`, 3000);
+            Logger.info(`[DirectSync] Success: ${fileName}`);
+            return;
+          }
+        }
+
+        // Wait a bit for upload to complete
+        await new Promise(resolve => setTimeout(resolve, 500));
+        this._updateCloudFileIndicator(vscode.window.activeTextEditor);
+
+        if (syncResult.uploaded) {
+          vscode.window.setStatusBarMessage(`$(cloud-upload) ${fileName} uploaded`, 3000);
+        } else if (syncResult.queued) {
+          vscode.window.setStatusBarMessage(`$(clock) ${fileName} queued for upload`, 3000);
+        } else {
+          vscode.window.setStatusBarMessage(`$(cloud) ${fileName} saved`, 3000);
+        }
+      } catch (error) {
+        Logger.error(`Sync error: ${fileName}`, error);
+        this._updateCloudFileIndicator(vscode.window.activeTextEditor);
+        vscode.window.setStatusBarMessage(`$(warning) ${fileName} sync may be delayed`, 3000);
+      }
+    }
+  }
+
+  /**
    * Update status bar display
    */
   update(): void {
@@ -121,5 +194,6 @@ export class StatusBarProvider implements vscode.Disposable {
     this.statusBarItem.dispose();
     this.cloudFileIndicator.dispose();
     this.editorChangeListener.dispose();
+    this.saveListener.dispose();
   }
 }

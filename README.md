@@ -65,7 +65,9 @@ winget install WinFsp.WinFsp
 | `ignoreCertErrors` | boolean | false | Ignore SSL certificate errors |
 | `autoConnect` | boolean | false | Connect on VS Code startup |
 | `cacheMode` | string | "full" | VFS cache mode |
-| `idleTimeout` | string | "5m" | Keep-alive timeout |
+| `idleTimeout` | string | "0" | Keep-alive timeout (0 = disabled) |
+
+> **Note**: `idleTimeout` is set to `0` by default since v0.1.5, meaning connections stay open as long as VS Code is running. The extension monitors connection health and will notify you if a connection is lost.
 
 ### Storage Options
 
@@ -137,6 +139,8 @@ To store the password in the workspace file, simply add the `password` field to 
 3. The remote filesystem is mounted to a drive letter (e.g., Z:)
 4. VS Code can read/write files as if they were local
 5. rclone syncs changes back to the server automatically
+
+> **Note**: SFTP+ uses the `--inplace` option to write directly to files without temporary `.partial` files. This ensures maximum compatibility with FTP/FTPS servers.
 
 ## Limitations
 

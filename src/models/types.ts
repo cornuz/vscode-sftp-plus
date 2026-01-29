@@ -88,8 +88,20 @@ export interface Connection {
   /** rclone process ID when mounted */
   processId?: number;
 
+  /** rclone RC API port for this mount */
+  rcPort?: number;
+
   /** Error message if connection failed */
   error?: string;
+
+  /** MCP server is active for this connection (runtime only) */
+  mcpActive?: boolean;
+
+  /** Set of remote paths with AI write access (runtime only, reset on disconnect) */
+  aiWritablePaths?: Set<string>;
+
+  /** Obscured password for direct sync (runtime only, not persisted) */
+  obscuredPassword?: string;
 }
 
 /**

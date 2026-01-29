@@ -113,6 +113,10 @@ export class ConnectionTreeItem extends vscode.TreeItem {
   private getIcon(): vscode.ThemeIcon {
     switch (this.connection.status) {
       case ConnectionStatus.Connected:
+        // Use MCP icon (blue) when MCP is active, otherwise plug icon (green)
+        if (this.connection.mcpActive) {
+          return new vscode.ThemeIcon('mcp', new vscode.ThemeColor('charts.blue'));
+        }
         return new vscode.ThemeIcon('plug', new vscode.ThemeColor('charts.green'));
       case ConnectionStatus.Connecting:
       case ConnectionStatus.Disconnecting:
@@ -125,9 +129,10 @@ export class ConnectionTreeItem extends vscode.TreeItem {
   }
 
   private getContextValue(): string {
+    const mcpSuffix = this.connection.mcpActive ? '-mcp' : '';
     switch (this.connection.status) {
       case ConnectionStatus.Connected:
-        return 'connected';
+        return `connected${mcpSuffix}`;
       case ConnectionStatus.Disconnected:
         return 'disconnected';
       default:
