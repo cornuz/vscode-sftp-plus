@@ -11,3 +11,11 @@ node_modules/**
 
 # Local data
 .sftp-plus/**
+
+# Development files
+_logs/**
+_screenshots/**
+AGENTS.md
+SFTP+.code-workspace
+pnpm-lock.yaml
+*.vsix
