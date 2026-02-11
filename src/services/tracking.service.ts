@@ -30,6 +30,7 @@ export interface TrackedFileWithContext extends TrackedFile {
  */
 export class TrackingService {
   private static readonly TRACKING_FOLDER = '.sftp-plus';
+  private static readonly ORIGINALS_FOLDER = 'originals';
   private static readonly TRACKING_FILE = 'tracking.json';
   private static readonly DATA_VERSION = 2;
 
@@ -377,6 +378,207 @@ export class TrackingService {
       vscode.window.showErrorMessage(`Failed to upload: ${error}`);
       return false;
     }
+  }
+
+  /**
+   * Get the originals folder path for a connection
+   */
+  private _getOriginalsFolderPath(connectionName: string): string | undefined {
+    const root = this._getWorkspaceRoot();
+    return root
+      ? path.join(root, TrackingService.TRACKING_FOLDER, TrackingService.ORIGINALS_FOLDER, connectionName)
+      : undefined;
+  }
+
+  /**
+   * Get the original backup path for a specific file
+   */
+  getOriginalPath(connectionName: string, relativePath: string): string | undefined {
+    const root = this._getWorkspaceRoot();
+    if (!root) return undefined;
+    return path.join(
+      root,
+      TrackingService.TRACKING_FOLDER,
+      TrackingService.ORIGINALS_FOLDER,
+      connectionName,
+      relativePath.replace(/\//g, path.sep)
+    );
+  }
+
+  /**
+   * Backup the original server version of a file before any modification.
+   * Only creates the backup if it does NOT already exist (immutable snapshot).
+   * Copies from the mounted drive (remote server) to .sftp-plus/originals/{connection}/{path}.
+   *
+   * @returns The path to the original backup, or null if backup failed
+   */
+  async backupOriginal(
+    connectionName: string,
+    remotePath: string,
+    driveLetter: string
+  ): Promise<string | null> {
+    const originalsFolder = this._getOriginalsFolderPath(connectionName);
+    if (!originalsFolder) {
+      Logger.error('Cannot backup original: no workspace root');
+      return null;
+    }
+
+    // Clean remote path (remove leading slashes, normalize separators)
+    const cleanPath = remotePath.replace(/^\/+/, '').replace(/\\/g, '/');
+    const originalFilePath = path.join(originalsFolder, cleanPath.replace(/\//g, path.sep));
+
+    // Immutable: if backup already exists, return existing path
+    if (fs.existsSync(originalFilePath)) {
+      Logger.info(`Original backup already exists: ${originalFilePath}`);
+      return originalFilePath;
+    }
+
+    // Build full remote path on mounted drive
+    const fullRemotePath = `${driveLetter}:\\${cleanPath.replace(/\//g, '\\')}`;
+
+    try {
+      // Check if remote file exists
+      if (!fs.existsSync(fullRemotePath)) {
+        Logger.warn(`Cannot backup original: remote file not found: ${fullRemotePath}`);
+        return null;
+      }
+
+      // Ensure directory exists
+      await fs.promises.mkdir(path.dirname(originalFilePath), { recursive: true });
+
+      // Copy from server (mounted drive) to originals folder
+      await fs.promises.copyFile(fullRemotePath, originalFilePath);
+
+      Logger.info(`Original backup created: ${originalFilePath} (from ${fullRemotePath})`);
+      return originalFilePath;
+    } catch (error) {
+      Logger.error(`Failed to backup original for ${cleanPath}:`, error);
+      return null;
+    }
+  }
+
+  /**
+   * Check if an original backup exists for a file
+   */
+  hasOriginal(connectionName: string, remotePath: string): boolean {
+    const originalPath = this.getOriginalPath(connectionName, remotePath.replace(/^\/+/, ''));
+    return originalPath ? fs.existsSync(originalPath) : false;
+  }
+
+  /**
+   * Restore the original backup to the local working copy.
+   * Does NOT delete the original (it stays as reference).
+   *
+   * @returns true if restored successfully
+   */
+  async restoreOriginal(connectionName: string, remotePath: string): Promise<boolean> {
+    const root = this._getWorkspaceRoot();
+    if (!root) return false;
+
+    const cleanPath = remotePath.replace(/^\/+/, '').replace(/\\/g, '/');
+    const originalPath = this.getOriginalPath(connectionName, cleanPath);
+    if (!originalPath || !fs.existsSync(originalPath)) {
+      Logger.warn(`No original backup to restore for ${connectionName}/${cleanPath}`);
+      return false;
+    }
+
+    // Target = local working copy (.sftp-plus/{connection}/{path})
+    const localCopyPath = path.join(root, `.sftp-plus/${connectionName}/${cleanPath}`);
+
+    try {
+      await fs.promises.mkdir(path.dirname(localCopyPath), { recursive: true });
+      await fs.promises.copyFile(originalPath, localCopyPath);
+      Logger.info(`Restored original to working copy: ${localCopyPath}`);
+      return true;
+    } catch (error) {
+      Logger.error(`Failed to restore original for ${cleanPath}:`, error);
+      return false;
+    }
+  }
+
+  /**
+   * Get detailed sync status for all tracked files of a connection.
+   * Returns structured data suitable for MCP tool output.
+   */
+  async getDetailedSyncStatus(
+    connectionName: string,
+    driveLetter: string
+  ): Promise<Array<{
+    remotePath: string;
+    localPath: string;
+    status: SyncStatus;
+    hasOriginal: boolean;
+    originalPath?: string;
+    localSize?: number;
+    remoteSize?: number;
+    originalSize?: number;
+    localModified?: string;
+    remoteModified?: string;
+  }>> {
+    const root = this._getWorkspaceRoot();
+    if (!root) return [];
+
+    const trackedFiles = await this.getTrackedFilesForConnection(connectionName, driveLetter);
+    const results: Array<{
+      remotePath: string;
+      localPath: string;
+      status: SyncStatus;
+      hasOriginal: boolean;
+      originalPath?: string;
+      localSize?: number;
+      remoteSize?: number;
+      originalSize?: number;
+      localModified?: string;
+      remoteModified?: string;
+    }> = [];
+
+    for (const tracked of trackedFiles) {
+      const status = await this.getSyncStatus(tracked);
+      const cleanPath = tracked.remotePath.replace(/^\/+/, '');
+      const originalBackupExists = this.hasOriginal(connectionName, cleanPath);
+      const originalPath = originalBackupExists
+        ? this.getOriginalPath(connectionName, cleanPath)
+        : undefined;
+
+      const entry: typeof results[0] = {
+        remotePath: tracked.remotePath,
+        localPath: tracked.localPath,
+        status,
+        hasOriginal: originalBackupExists,
+        originalPath: originalPath ? path.relative(root, originalPath).replace(/\\/g, '/') : undefined,
+      };
+
+      // Get file stats
+      const localFullPath = path.join(root, tracked.localPath);
+      try {
+        if (fs.existsSync(localFullPath)) {
+          const localStats = await fs.promises.stat(localFullPath);
+          entry.localSize = localStats.size;
+          entry.localModified = localStats.mtime.toISOString();
+        }
+      } catch { /* skip */ }
+
+      try {
+        if (fs.existsSync(tracked.fullRemotePath)) {
+          const remoteStats = await fs.promises.stat(tracked.fullRemotePath);
+          entry.remoteSize = remoteStats.size;
+          entry.remoteModified = remoteStats.mtime.toISOString();
+        }
+      } catch { /* skip */ }
+
+      if (originalPath) {
+        try {
+          if (fs.existsSync(originalPath)) {
+            const origStats = await fs.promises.stat(originalPath);
+            entry.originalSize = origStats.size;
+          }
+        } catch { /* skip */ }
+      }
+
+      results.push(entry);
+    }
+
+    return results;
   }
 
   /**

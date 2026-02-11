@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { Connection, ConnectionStatus } from '../models';
 import { ConnectionManager } from '../services/connection.manager';
+import { TrackingService } from '../services/tracking.service';
 import { Logger } from '../utils/logger';
 
 /**
@@ -20,6 +21,16 @@ export interface AiPermissionChangeEvent {
 export type AiWriteMode = 'local' | 'host';
 
 /**
+ * Persisted MCP state for a connection (saved in workspaceState)
+ */
+interface PersistedMcpState {
+  /** Connection had MCP active */
+  active: boolean;
+  /** Serialized writable paths: [path, mode][] */
+  writablePaths: Array<[string, 'local' | 'host']>;
+}
+
+/**
  * Manages MCP/Copilot access for SFTP+ connections.
  * Registers Language Model Tools that provide file access to Copilot.
  * Tools are registered on-demand when the first MCP is activated (lazy registration).
@@ -33,8 +44,198 @@ export class McpManager implements vscode.Disposable {
   private _onDidChangeMcpStatus = new vscode.EventEmitter<string>();
   readonly onDidChangeMcpStatus = this._onDidChangeMcpStatus.event;
 
+  /** Workspace-scoped persistent storage for MCP state */
+  private _workspaceState: vscode.Memento | undefined;
+
+  /** Tracking service for backup/sync operations */
+  private _trackingService: TrackingService | undefined;
+
   constructor(private readonly connectionManager: ConnectionManager) {
     // Tools are registered lazily on first MCP activation
+  }
+
+  /**
+   * Set the tracking service for backup/sync operations.
+   * Must be called after construction.
+   */
+  setTrackingService(trackingService: TrackingService): void {
+    this._trackingService = trackingService;
+  }
+
+  /**
+   * Set the workspace state storage for MCP persistence.
+   * Must be called after construction with context.workspaceState.
+   */
+  setWorkspaceState(workspaceState: vscode.Memento): void {
+    this._workspaceState = workspaceState;
+  }
+
+  /**
+   * Restore MCP state from workspaceState for all connections.
+   * Called at startup after connections are loaded.
+   * Sets mcpSuspended on connections that previously had MCP active,
+   * so they auto-resume when connected.
+   */
+  async restoreMcpState(): Promise<void> {
+    if (!this._workspaceState) return;
+
+    const states = this._workspaceState.get<Record<string, PersistedMcpState>>('mcpStates', {});
+    let restored = 0;
+
+    for (const [name, state] of Object.entries(states)) {
+      if (!state.active) continue;
+
+      const connection = this.connectionManager.getConnection(name);
+      if (!connection) continue;
+
+      // Restore writable paths
+      connection.aiWritablePaths = new Map(state.writablePaths);
+
+      if (connection.status === ConnectionStatus.Connected) {
+        // Connection already connected — resume MCP immediately
+        this._registerToolHandlers();
+        connection.mcpActive = true;
+        connection.mcpSuspended = false;
+        restored++;
+        Logger.info(`MCP auto-restored for ${name} (connected, ${connection.aiWritablePaths.size} writable paths)`);
+      } else {
+        // Connection not yet connected — mark as suspended for auto-resume
+        connection.mcpSuspended = true;
+        restored++;
+        Logger.info(`MCP state restored for ${name} (suspended, will resume on connect)`);
+      }
+    }
+
+    if (restored > 0) {
+      Logger.info(`Restored MCP state for ${restored} connection(s)`);
+      this._onDidChangeMcpStatus.fire('');
+    }
+  }
+
+  /**
+   * Persist current MCP state to workspaceState.
+   * Called whenever MCP state changes (activate, suspend, stop).
+   */
+  private _persistMcpState(): void {
+    if (!this._workspaceState) return;
+
+    const states: Record<string, PersistedMcpState> = {};
+
+    for (const connection of this.connectionManager.getConnections()) {
+      if (connection.mcpActive || connection.mcpSuspended) {
+        states[connection.config.name] = {
+          active: true,
+          writablePaths: connection.aiWritablePaths
+            ? Array.from(connection.aiWritablePaths.entries())
+            : [],
+        };
+      }
+    }
+
+    this._workspaceState.update('mcpStates', states);
+  }
+
+  // ============================================
+  // Connection validation & retry helpers
+  // ============================================
+
+  /**
+   * Validate that a connection is ready for MCP tool usage.
+   * Returns an error LanguageModelToolResult if not ready, or null if OK.
+   * Handles suspended connections with a clear "temporary" message for AI agents.
+   */
+  private _validateConnection(
+    connectionName: string,
+    requireMcp: boolean = true
+  ): { connection: Connection; error: null } | { connection: null; error: vscode.LanguageModelToolResult } {
+    const connection = this.connectionManager.getConnection(connectionName);
+
+    if (!connection) {
+      return {
+        connection: null,
+        error: new vscode.LanguageModelToolResult([
+          new vscode.LanguageModelTextPart(
+            `Error: Connection "${connectionName}" not found. Use sftp-plus_list_connections to see available connections.`
+          ),
+        ]),
+      };
+    }
+
+    // Check if MCP is suspended (connection dropped, will auto-resume)
+    if (connection.mcpSuspended && !connection.mcpActive) {
+      return {
+        connection: null,
+        error: new vscode.LanguageModelToolResult([
+          new vscode.LanguageModelTextPart(
+            `TEMPORARY: The SFTP connection "${connectionName}" was temporarily lost and is reconnecting. ` +
+            `MCP access will auto-resume once the connection is restored. ` +
+            `Please ask the user to reconnect via the SFTP+ panel, then retry this tool call in ~10 seconds.`
+          ),
+        ]),
+      };
+    }
+
+    if (requireMcp && !connection.mcpActive) {
+      return {
+        connection: null,
+        error: new vscode.LanguageModelToolResult([
+          new vscode.LanguageModelTextPart(
+            `Error: Copilot access is not enabled for "${connectionName}". ` +
+            `Ask the user to enable it via the SFTP+ panel (click the Copilot icon on the connection).`
+          ),
+        ]),
+      };
+    }
+
+    if (connection.status !== ConnectionStatus.Connected || !connection.mountedDrive) {
+      return {
+        connection: null,
+        error: new vscode.LanguageModelToolResult([
+          new vscode.LanguageModelTextPart(
+            `TEMPORARY: Connection "${connectionName}" is not currently connected/mounted. ` +
+            `Please ask the user to reconnect via the SFTP+ panel, then retry this tool call in ~10 seconds.`
+          ),
+        ]),
+      };
+    }
+
+    return { connection, error: null };
+  }
+
+  /**
+   * Check if the mounted drive is accessible, with retry.
+   * Waits briefly and retries if the drive is temporarily unavailable (e.g., during reconnection).
+   * Returns an error result if the drive is inaccessible after retries, or null if OK.
+   */
+  private async _checkDriveAccessible(
+    connection: Connection,
+    connectionName: string,
+    maxAttempts: number = 3,
+    delayMs: number = 2000
+  ): Promise<vscode.LanguageModelToolResult | null> {
+    const basePath = `${connection.mountedDrive}:${path.sep}`;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      if (fs.existsSync(basePath)) {
+        return null; // Drive is accessible
+      }
+
+      if (attempt < maxAttempts) {
+        Logger.warn(
+          `Drive ${connection.mountedDrive}: not accessible for "${connectionName}" ` +
+          `(attempt ${attempt}/${maxAttempts}), retrying in ${delayMs}ms...`
+        );
+        await new Promise(resolve => setTimeout(resolve, delayMs));
+      }
+    }
+
+    return new vscode.LanguageModelToolResult([
+      new vscode.LanguageModelTextPart(
+        `TEMPORARY: Drive ${connection.mountedDrive}: is not accessible after ${maxAttempts} attempts. ` +
+        `The SFTP connection may have been temporarily disrupted. ` +
+        `Please ask the user to check the connection in the SFTP+ panel, then retry this tool call in ~10 seconds.`
+      ),
+    ]);
   }
 
   /**
@@ -148,6 +349,26 @@ export class McpManager implements vscode.Disposable {
       })
     );
 
+    // Tool: get_sync_status - Get sync status for tracked files
+    this._disposables.push(
+      vscode.lm.registerTool('sftp-plus_get_sync_status', {
+        invoke: async (options, _token) => {
+          const input = options.input as { connectionName: string };
+          return this._getSyncStatus(input.connectionName);
+        },
+      })
+    );
+
+    // Tool: restore_original - Restore original server version
+    this._disposables.push(
+      vscode.lm.registerTool('sftp-plus_restore_original', {
+        invoke: async (options, _token) => {
+          const input = options.input as { connectionName: string; path: string };
+          return this._restoreOriginal(input.connectionName, input.path);
+        },
+      })
+    );
+
     this._toolsRegistered = true;
     Logger.info('SFTP+ Language Model Tools registered');
   }
@@ -173,13 +394,17 @@ export class McpManager implements vscode.Disposable {
     // Register tools on first MCP activation (lazy registration)
     this._registerToolHandlers();
 
-    // Initialize AI writable paths map
-    connection.aiWritablePaths = new Map<string, 'local' | 'host'>();
+    // Initialize AI writable paths map (unless restored from suspend)
+    if (!connection.aiWritablePaths) {
+      connection.aiWritablePaths = new Map<string, 'local' | 'host'>();
+    }
     connection.mcpActive = true;
+    connection.mcpSuspended = false;
 
     Logger.info(`MCP/Copilot access enabled for ${connectionName}`);
     vscode.window.showInformationMessage(`SFTP+: Copilot access enabled for ${connectionName}`);
 
+    this._persistMcpState();
     this._onDidChangeMcpStatus.fire(connectionName);
   }
 
@@ -192,14 +417,90 @@ export class McpManager implements vscode.Disposable {
       return;
     }
 
-    // Clear MCP state
+    // Clear MCP state completely (user-initiated stop)
     connection.mcpActive = false;
+    connection.mcpSuspended = false;
     connection.aiWritablePaths = undefined;
 
     Logger.info(`MCP/Copilot access disabled for ${connectionName}`);
     vscode.window.showInformationMessage(`SFTP+: Copilot access disabled for ${connectionName}`);
 
+    this._persistMcpState();
     this._onDidChangeMcpStatus.fire(connectionName);
+  }
+
+  /**
+   * Suspend MCP for a connection (connection dropped but will auto-resume).
+   * Preserves aiWritablePaths so they can be restored on reconnect.
+   */
+  async suspendMcp(connectionName: string): Promise<void> {
+    const connection = this.connectionManager.getConnection(connectionName);
+    if (!connection || !connection.mcpActive) {
+      return;
+    }
+
+    // Mark as suspended — keep aiWritablePaths intact
+    connection.mcpActive = false;
+    connection.mcpSuspended = true;
+
+    Logger.info(`MCP suspended for ${connectionName} (will auto-resume on reconnect)`);
+    this._persistMcpState();
+    this._onDidChangeMcpStatus.fire(connectionName);
+  }
+
+  /**
+   * Resume a previously suspended MCP session after reconnection.
+   * Restores mcpActive with the preserved aiWritablePaths.
+   */
+  async resumeMcp(connectionName: string): Promise<void> {
+    const connection = this.connectionManager.getConnection(connectionName);
+    if (!connection) {
+      return;
+    }
+
+    if (!connection.mcpSuspended) {
+      return;
+    }
+
+    if (connection.status !== ConnectionStatus.Connected) {
+      Logger.warn(`Cannot resume MCP for ${connectionName}: not connected`);
+      return;
+    }
+
+    // Register tools if not yet done (lazy registration)
+    this._registerToolHandlers();
+
+    // Restore MCP active state
+    connection.mcpActive = true;
+    connection.mcpSuspended = false;
+
+    // Ensure aiWritablePaths map exists (it was preserved from suspend)
+    if (!connection.aiWritablePaths) {
+      connection.aiWritablePaths = new Map<string, 'local' | 'host'>();
+    }
+
+    Logger.info(`MCP resumed for ${connectionName} with ${connection.aiWritablePaths.size} writable path(s)`);
+    vscode.window.showInformationMessage(`SFTP+: Copilot access auto-resumed for ${connectionName}`);
+
+    this._persistMcpState();
+    this._onDidChangeMcpStatus.fire(connectionName);
+  }
+
+  /**
+   * Check if MCP is suspended for a connection (waiting for reconnect)
+   */
+  isMcpSuspended(connectionName: string): boolean {
+    const connection = this.connectionManager.getConnection(connectionName);
+    return connection?.mcpSuspended === true;
+  }
+
+  /**
+   * Get connections that have MCP suspended (waiting for reconnect)
+   */
+  getSuspendedMcpConnections(): string[] {
+    return this.connectionManager.getConnections()
+      .filter(c => c.mcpSuspended)
+      .map(c => c.config.name);
   }
 
   /**
@@ -230,6 +531,7 @@ export class McpManager implements vscode.Disposable {
         path: filePath,
         mode: null,
       });
+      this._persistMcpState();
       return null;
     } else {
       // No access - show menu to choose mode
@@ -248,6 +550,7 @@ export class McpManager implements vscode.Disposable {
           path: filePath,
           mode: choice.value,
         });
+        this._persistMcpState();
         return choice.value;
       }
       return null;
@@ -274,6 +577,7 @@ export class McpManager implements vscode.Disposable {
       path: filePath,
       mode,
     });
+    this._persistMcpState();
   }
 
   /**
@@ -356,6 +660,7 @@ export class McpManager implements vscode.Disposable {
         path: folderPath,
         mode: choice.value,
       });
+      this._persistMcpState();
     }
   }
 
@@ -385,6 +690,7 @@ export class McpManager implements vscode.Disposable {
       path: folderPath,
       mode: null,
     });
+    this._persistMcpState();
   }
 
   /**
@@ -456,6 +762,11 @@ export class McpManager implements vscode.Disposable {
 
       const workspaceRoot = workspaceFolders[0].uri.fsPath;
 
+      // Backup original server version before any modification
+      if (this._trackingService && connection.mountedDrive) {
+        await this._trackingService.backupOriginal(connectionName, cleanRemotePath, connection.mountedDrive);
+      }
+
       // Calculate local path: .sftp-plus/[connection]/[relative-path]
       const localRelativePath = `.sftp-plus/${connectionName}/${cleanRemotePath}`;
       const localFullPath = path.join(workspaceRoot, localRelativePath);
@@ -504,15 +815,21 @@ export class McpManager implements vscode.Disposable {
       protocol: c.config.protocol,
       status: c.status,
       mcpEnabled: c.mcpActive === true,
+      mcpSuspended: c.mcpSuspended === true,
       mountedDrive: c.mountedDrive || null,
     }));
 
     const mcpEnabledCount = result.filter(c => c.mcpEnabled).length;
+    const mcpSuspendedCount = result.filter(c => c.mcpSuspended).length;
 
     let summary = `Found ${connections.length} connection(s)`;
     if (mcpEnabledCount > 0) {
       summary += `, ${mcpEnabledCount} with Copilot access enabled`;
-    } else {
+    }
+    if (mcpSuspendedCount > 0) {
+      summary += `, ${mcpSuspendedCount} with Copilot access suspended (will auto-resume on reconnect)`;
+    }
+    if (mcpEnabledCount === 0 && mcpSuspendedCount === 0) {
       summary += `. Note: No connections have Copilot access enabled. Ask the user to enable it via the SFTP+ panel.`;
     }
 
@@ -525,25 +842,13 @@ export class McpManager implements vscode.Disposable {
    * List files in a directory (with optional recursive support)
    */
   private async _listFiles(connectionName: string, remotePath?: string, recursive?: boolean, maxDepth?: number): Promise<vscode.LanguageModelToolResult> {
-    const connection = this.connectionManager.getConnection(connectionName);
+    const validation = this._validateConnection(connectionName);
+    if (validation.error) return validation.error;
+    const connection = validation.connection;
 
-    if (!connection) {
-      return new vscode.LanguageModelToolResult([
-        new vscode.LanguageModelTextPart(`Error: Connection "${connectionName}" not found. Use sftp-plus_list_connections to see available connections.`),
-      ]);
-    }
-
-    if (!connection.mcpActive) {
-      return new vscode.LanguageModelToolResult([
-        new vscode.LanguageModelTextPart(`Error: Copilot access is not enabled for "${connectionName}". Ask the user to enable it via the SFTP+ panel (click the Copilot icon on the connection).`),
-      ]);
-    }
-
-    if (!connection.mountedDrive) {
-      return new vscode.LanguageModelToolResult([
-        new vscode.LanguageModelTextPart(`Error: Connection "${connectionName}" is not mounted. It needs to be connected first.`),
-      ]);
-    }
+    // Check drive accessibility with retry
+    const driveError = await this._checkDriveAccessible(connection, connectionName);
+    if (driveError) return driveError;
 
     // Construct the path - handle both with and without leading slash
     const basePath = `${connection.mountedDrive}:`;
@@ -553,16 +858,6 @@ export class McpManager implements vscode.Disposable {
     Logger.info(`MCP list_files: basePath=${basePath}, remotePath=${remotePath}, targetPath=${targetPath}, recursive=${recursive}`);
 
     try {
-      // Check if drive exists
-      if (!fs.existsSync(basePath + path.sep)) {
-        return new vscode.LanguageModelToolResult([
-          new vscode.LanguageModelTextPart(
-            `Error: Drive ${connection.mountedDrive}: is not accessible. ` +
-            `The SFTP connection may have been disconnected. Please reconnect via SFTP+ panel.`
-          ),
-        ]);
-      }
-
       const items: Array<{ name: string; type: string; path: string }> = [];
       const depth = maxDepth ?? 10;
 
@@ -572,11 +867,22 @@ export class McpManager implements vscode.Disposable {
         const entries = await fs.promises.readdir(targetPath, { withFileTypes: true });
         for (const e of entries) {
           if (!e.name.startsWith('.')) {
-            items.push({
+            const itemPath = (cleanRemotePath ? cleanRemotePath + '/' : '') + e.name;
+            const fullItemPath = path.join(targetPath, e.name);
+            const item: { name: string; type: string; path: string; size?: number; modified?: string } = {
               name: e.name,
               type: e.isDirectory() ? 'folder' : 'file',
-              path: (cleanRemotePath ? cleanRemotePath + '/' : '') + e.name,
-            });
+              path: itemPath,
+            };
+            // Add metadata for files
+            if (!e.isDirectory()) {
+              try {
+                const stat = await fs.promises.stat(fullItemPath);
+                item.size = stat.size;
+                item.modified = stat.mtime.toISOString();
+              } catch { /* skip metadata on error */ }
+            }
+            items.push(item);
           }
         }
       }
@@ -606,7 +912,7 @@ export class McpManager implements vscode.Disposable {
   private async _listFilesRecursive(
     fsPath: string,
     relativePath: string,
-    results: Array<{ name: string; type: string; path: string }>,
+    results: Array<{ name: string; type: string; path: string; size?: number; modified?: string }>,
     maxDepth: number,
     currentDepth: number
   ): Promise<void> {
@@ -619,16 +925,28 @@ export class McpManager implements vscode.Disposable {
 
         const itemPath = (relativePath ? relativePath + '/' : '') + e.name;
         const isDir = e.isDirectory();
+        const fullItemPath = path.join(fsPath, e.name);
 
-        results.push({
+        const item: { name: string; type: string; path: string; size?: number; modified?: string } = {
           name: e.name,
           type: isDir ? 'folder' : 'file',
           path: itemPath,
-        });
+        };
+
+        // Add metadata for files
+        if (!isDir) {
+          try {
+            const stat = await fs.promises.stat(fullItemPath);
+            item.size = stat.size;
+            item.modified = stat.mtime.toISOString();
+          } catch { /* skip metadata on error */ }
+        }
+
+        results.push(item);
 
         if (isDir) {
           await this._listFilesRecursive(
-            path.join(fsPath, e.name),
+            fullItemPath,
             itemPath,
             results,
             maxDepth,
@@ -646,25 +964,13 @@ export class McpManager implements vscode.Disposable {
    * Read file content
    */
   private async _readFile(connectionName: string, remotePath: string): Promise<vscode.LanguageModelToolResult> {
-    const connection = this.connectionManager.getConnection(connectionName);
+    const validation = this._validateConnection(connectionName);
+    if (validation.error) return validation.error;
+    const connection = validation.connection;
 
-    if (!connection) {
-      return new vscode.LanguageModelToolResult([
-        new vscode.LanguageModelTextPart(`Error: Connection "${connectionName}" not found.`),
-      ]);
-    }
-
-    if (!connection.mcpActive) {
-      return new vscode.LanguageModelToolResult([
-        new vscode.LanguageModelTextPart(`Error: Copilot access is not enabled for "${connectionName}". Ask the user to enable it.`),
-      ]);
-    }
-
-    if (!connection.mountedDrive) {
-      return new vscode.LanguageModelToolResult([
-        new vscode.LanguageModelTextPart(`Error: Connection "${connectionName}" is not mounted.`),
-      ]);
-    }
+    // Check drive accessibility with retry
+    const driveError = await this._checkDriveAccessible(connection, connectionName);
+    if (driveError) return driveError;
 
     // Construct the path - handle both with and without leading slash
     const basePath = `${connection.mountedDrive}:`;
@@ -674,16 +980,6 @@ export class McpManager implements vscode.Disposable {
     Logger.info(`MCP read_file: basePath=${basePath}, remotePath=${remotePath}, fullPath=${fullPath}`);
 
     try {
-      // Check if drive exists
-      if (!fs.existsSync(basePath + path.sep)) {
-        return new vscode.LanguageModelToolResult([
-          new vscode.LanguageModelTextPart(
-            `Error: Drive ${connection.mountedDrive}: is not accessible. ` +
-            `The SFTP connection may have been disconnected. Please reconnect via SFTP+ panel.`
-          ),
-        ]);
-      }
-
       // Check if file exists
       if (!fs.existsSync(fullPath)) {
         return new vscode.LanguageModelToolResult([
@@ -727,25 +1023,13 @@ export class McpManager implements vscode.Disposable {
    * Write file content
    */
   private async _writeFile(connectionName: string, remotePath: string, content: string): Promise<vscode.LanguageModelToolResult> {
-    const connection = this.connectionManager.getConnection(connectionName);
+    const validation = this._validateConnection(connectionName);
+    if (validation.error) return validation.error;
+    const connection = validation.connection;
 
-    if (!connection) {
-      return new vscode.LanguageModelToolResult([
-        new vscode.LanguageModelTextPart(`Error: Connection "${connectionName}" not found.`),
-      ]);
-    }
-
-    if (!connection.mcpActive) {
-      return new vscode.LanguageModelToolResult([
-        new vscode.LanguageModelTextPart(`Error: Copilot access is not enabled for "${connectionName}".`),
-      ]);
-    }
-
-    if (!connection.mountedDrive) {
-      return new vscode.LanguageModelToolResult([
-        new vscode.LanguageModelTextPart(`Error: Connection "${connectionName}" is not mounted.`),
-      ]);
-    }
+    // Check drive accessibility with retry
+    const driveError = await this._checkDriveAccessible(connection, connectionName);
+    if (driveError) return driveError;
 
     // Construct the path - handle both with and without leading slash
     const basePath = `${connection.mountedDrive}:`;
@@ -776,14 +1060,9 @@ export class McpManager implements vscode.Disposable {
     }
 
     try {
-      // Check if drive exists
-      if (!fs.existsSync(basePath + path.sep)) {
-        return new vscode.LanguageModelToolResult([
-          new vscode.LanguageModelTextPart(
-            `Error: Drive ${connection.mountedDrive}: is not accessible. ` +
-            `The SFTP connection may have been disconnected. Please reconnect via SFTP+ panel.`
-          ),
-        ]);
+      // Backup original before first modification
+      if (this._trackingService && connection.mountedDrive) {
+        await this._trackingService.backupOriginal(connectionName, cleanRemotePath, connection.mountedDrive);
       }
 
       // Ensure directory exists
@@ -791,9 +1070,11 @@ export class McpManager implements vscode.Disposable {
       await fs.promises.writeFile(fullPath, content, 'utf-8');
 
       const fileName = path.basename(remotePath);
+      const hasBackup = this._trackingService?.hasOriginal(connectionName, cleanRemotePath) ?? false;
+      const backupNote = hasBackup ? '\nOriginal server version backed up in .sftp-plus/originals/' : '';
       return new vscode.LanguageModelToolResult([
         new vscode.LanguageModelTextPart(
-          `Successfully wrote to "${fileName}" on ${connectionName} (${connection.config.host})`
+          `Successfully wrote to "${fileName}" on ${connectionName} (${connection.config.host})${backupNote}`
         ),
       ]);
     } catch (error) {
@@ -812,25 +1093,13 @@ export class McpManager implements vscode.Disposable {
    * This allows Copilot to use standard edit tools with diff preview
    */
   private async _prepareEdit(connectionName: string, remotePath: string): Promise<vscode.LanguageModelToolResult> {
-    const connection = this.connectionManager.getConnection(connectionName);
+    const validation = this._validateConnection(connectionName);
+    if (validation.error) return validation.error;
+    const connection = validation.connection;
 
-    if (!connection) {
-      return new vscode.LanguageModelToolResult([
-        new vscode.LanguageModelTextPart(`Error: Connection "${connectionName}" not found.`),
-      ]);
-    }
-
-    if (!connection.mcpActive) {
-      return new vscode.LanguageModelToolResult([
-        new vscode.LanguageModelTextPart(`Error: Copilot access is not enabled for "${connectionName}".`),
-      ]);
-    }
-
-    if (!connection.mountedDrive) {
-      return new vscode.LanguageModelToolResult([
-        new vscode.LanguageModelTextPart(`Error: Connection "${connectionName}" is not mounted.`),
-      ]);
-    }
+    // Check drive accessibility with retry
+    const driveError = await this._checkDriveAccessible(connection, connectionName);
+    if (driveError) return driveError;
 
     // Construct the remote path
     const basePath = `${connection.mountedDrive}:`;
@@ -867,6 +1136,11 @@ export class McpManager implements vscode.Disposable {
 
       const workspaceRoot = workspaceFolders[0].uri.fsPath;
 
+      // Backup original server version before any modification
+      if (this._trackingService && connection.mountedDrive) {
+        await this._trackingService.backupOriginal(connectionName, cleanRemotePath, connection.mountedDrive);
+      }
+
       // Calculate local path: .sftp-plus/[connection]/[relative-path]
       const localRelativePath = `.sftp-plus/${connectionName}/${cleanRemotePath.replace(/\\/g, '/')}`;
       const localFullPath = path.join(workspaceRoot, localRelativePath);
@@ -884,13 +1158,15 @@ export class McpManager implements vscode.Disposable {
       await vscode.window.showTextDocument(document);
 
       const fileName = path.basename(remotePath);
+      const hasBackup = this._trackingService?.hasOriginal(connectionName, cleanRemotePath) ?? false;
+      const backupNote = hasBackup ? '\n\nOriginal server version backed up in .sftp-plus/originals/. Use sftp-plus_restore_original to rollback if needed.' : '';
       return new vscode.LanguageModelToolResult([
         new vscode.LanguageModelTextPart(
           `File "${fileName}" from ${connectionName} has been downloaded and opened locally.\n\n` +
           `**Local file path:** ${localFullPath}\n\n` +
           `You can now edit this file using standard Copilot edit tools. ` +
           `The user will see a diff preview and can accept or reject your changes. ` +
-          `After editing, the user can sync the file back to the server via the SFTP+ tracking feature.`
+          `After editing, the user can sync the file back to the server via the SFTP+ tracking feature.${backupNote}`
         ),
       ]);
     } catch (error) {
@@ -907,19 +1183,9 @@ export class McpManager implements vscode.Disposable {
    * List paths with write access
    */
   private _listWritablePaths(connectionName: string): vscode.LanguageModelToolResult {
-    const connection = this.connectionManager.getConnection(connectionName);
-
-    if (!connection) {
-      return new vscode.LanguageModelToolResult([
-        new vscode.LanguageModelTextPart(`Error: Connection "${connectionName}" not found.`),
-      ]);
-    }
-
-    if (!connection.mcpActive) {
-      return new vscode.LanguageModelToolResult([
-        new vscode.LanguageModelTextPart(`Error: Copilot access is not enabled for "${connectionName}".`),
-      ]);
-    }
+    const validation = this._validateConnection(connectionName, true);
+    if (validation.error) return validation.error;
+    const connection = validation.connection;
 
     const pathsWithModes = this.getAiWritablePaths(connectionName);
     const basePath = connection.mountedDrive ? `${connection.mountedDrive}:\\` : '';
@@ -955,25 +1221,9 @@ export class McpManager implements vscode.Disposable {
    * Request write access tool implementation
    */
   private async _requestWriteAccessTool(connectionName: string, remotePath: string): Promise<vscode.LanguageModelToolResult> {
-    const connection = this.connectionManager.getConnection(connectionName);
-
-    if (!connection) {
-      return new vscode.LanguageModelToolResult([
-        new vscode.LanguageModelTextPart(`Error: Connection "${connectionName}" not found.`),
-      ]);
-    }
-
-    if (!connection.mcpActive) {
-      return new vscode.LanguageModelToolResult([
-        new vscode.LanguageModelTextPart(`Error: Copilot access is not enabled for "${connectionName}".`),
-      ]);
-    }
-
-    if (!connection.mountedDrive) {
-      return new vscode.LanguageModelToolResult([
-        new vscode.LanguageModelTextPart(`Error: Connection "${connectionName}" is not mounted.`),
-      ]);
-    }
+    const validation = this._validateConnection(connectionName);
+    if (validation.error) return validation.error;
+    const connection = validation.connection;
 
     const basePath = `${connection.mountedDrive}:\\`;
     const fullPath = path.join(basePath, remotePath);
@@ -1044,25 +1294,13 @@ export class McpManager implements vscode.Disposable {
     type?: 'file' | 'folder' | 'all',
     maxResults?: number
   ): Promise<vscode.LanguageModelToolResult> {
-    const connection = this.connectionManager.getConnection(connectionName);
+    const validation = this._validateConnection(connectionName);
+    if (validation.error) return validation.error;
+    const connection = validation.connection;
 
-    if (!connection) {
-      return new vscode.LanguageModelToolResult([
-        new vscode.LanguageModelTextPart(`Error: Connection "${connectionName}" not found.`),
-      ]);
-    }
-
-    if (!connection.mcpActive) {
-      return new vscode.LanguageModelToolResult([
-        new vscode.LanguageModelTextPart(`Error: Copilot access is not enabled for "${connectionName}".`),
-      ]);
-    }
-
-    if (!connection.mountedDrive) {
-      return new vscode.LanguageModelToolResult([
-        new vscode.LanguageModelTextPart(`Error: Connection "${connectionName}" is not mounted.`),
-      ]);
-    }
+    // Check drive accessibility with retry
+    const driveError = await this._checkDriveAccessible(connection, connectionName);
+    if (driveError) return driveError;
 
     const basePath = `${connection.mountedDrive}:`;
     const cleanRemotePath = remotePath ? remotePath.replace(/^\/+/, '') : '';
@@ -1073,16 +1311,6 @@ export class McpManager implements vscode.Disposable {
     Logger.info(`MCP search_files: pattern=${pattern}, path=${remotePath}, useRegex=${useRegex}, type=${filterType}`);
 
     try {
-      // Check if drive exists
-      if (!fs.existsSync(basePath + path.sep)) {
-        return new vscode.LanguageModelToolResult([
-          new vscode.LanguageModelTextPart(
-            `Error: Drive ${connection.mountedDrive}: is not accessible. ` +
-            `The SFTP connection may have been disconnected. Please reconnect via SFTP+ panel.`
-          ),
-        ]);
-      }
-
       // Create matcher function
       const matcher = this._createMatcher(pattern, useRegex ?? false);
       const results: Array<{ name: string; type: string; path: string }> = [];
@@ -1202,25 +1430,13 @@ export class McpManager implements vscode.Disposable {
     maxDepth?: number,
     includeFiles?: boolean
   ): Promise<vscode.LanguageModelToolResult> {
-    const connection = this.connectionManager.getConnection(connectionName);
+    const validation = this._validateConnection(connectionName);
+    if (validation.error) return validation.error;
+    const connection = validation.connection;
 
-    if (!connection) {
-      return new vscode.LanguageModelToolResult([
-        new vscode.LanguageModelTextPart(`Error: Connection "${connectionName}" not found.`),
-      ]);
-    }
-
-    if (!connection.mcpActive) {
-      return new vscode.LanguageModelToolResult([
-        new vscode.LanguageModelTextPart(`Error: Copilot access is not enabled for "${connectionName}".`),
-      ]);
-    }
-
-    if (!connection.mountedDrive) {
-      return new vscode.LanguageModelToolResult([
-        new vscode.LanguageModelTextPart(`Error: Connection "${connectionName}" is not mounted.`),
-      ]);
-    }
+    // Check drive accessibility with retry
+    const driveError = await this._checkDriveAccessible(connection, connectionName);
+    if (driveError) return driveError;
 
     const basePath = `${connection.mountedDrive}:`;
     const cleanRemotePath = remotePath ? remotePath.replace(/^\/+/, '') : '';
@@ -1231,16 +1447,6 @@ export class McpManager implements vscode.Disposable {
     Logger.info(`MCP get_tree: path=${remotePath}, maxDepth=${depth}, includeFiles=${withFiles}`);
 
     try {
-      // Check if drive exists
-      if (!fs.existsSync(basePath + path.sep)) {
-        return new vscode.LanguageModelToolResult([
-          new vscode.LanguageModelTextPart(
-            `Error: Drive ${connection.mountedDrive}: is not accessible. ` +
-            `The SFTP connection may have been disconnected. Please reconnect via SFTP+ panel.`
-          ),
-        ]);
-      }
-
       const tree = await this._buildTree(startPath, depth, 0, withFiles);
       const treeText = this._formatTree(tree, remotePath || '/', 0);
 
@@ -1313,6 +1519,114 @@ export class McpManager implements vscode.Disposable {
     }
 
     return result;
+  }
+
+  /**
+   * Get sync status for tracked files on a connection
+   */
+  private async _getSyncStatus(connectionName: string): Promise<vscode.LanguageModelToolResult> {
+    const validation = this._validateConnection(connectionName);
+    if (validation.error) return validation.error;
+    const connection = validation.connection;
+
+    if (!this._trackingService) {
+      return new vscode.LanguageModelToolResult([
+        new vscode.LanguageModelTextPart('Error: Tracking service not available.'),
+      ]);
+    }
+
+    if (!connection.mountedDrive) {
+      return new vscode.LanguageModelToolResult([
+        new vscode.LanguageModelTextPart('Error: Connection has no mounted drive.'),
+      ]);
+    }
+
+    try {
+      const statuses = await this._trackingService.getDetailedSyncStatus(connectionName, connection.mountedDrive);
+
+      if (statuses.length === 0) {
+        return new vscode.LanguageModelToolResult([
+          new vscode.LanguageModelTextPart(
+            `No tracked files for "${connectionName}". ` +
+            `Files are tracked automatically when you use sftp-plus_prepare_edit to download them for editing.`
+          ),
+        ]);
+      }
+
+      const summary = {
+        total: statuses.length,
+        synced: statuses.filter(s => s.status === 'synced').length,
+        localNewer: statuses.filter(s => s.status === 'local-newer').length,
+        remoteNewer: statuses.filter(s => s.status === 'remote-newer').length,
+        notDownloaded: statuses.filter(s => s.status === 'not-downloaded').length,
+        withOriginal: statuses.filter(s => s.hasOriginal).length,
+        errors: statuses.filter(s => s.status === 'error').length,
+      };
+
+      return new vscode.LanguageModelToolResult([
+        new vscode.LanguageModelTextPart(
+          `Sync status for "${connectionName}" — ${summary.total} tracked file(s):\n` +
+          `  ✅ Synced: ${summary.synced} | 📝 Local newer: ${summary.localNewer} | ` +
+          `🔄 Remote newer: ${summary.remoteNewer} | ⬇️ Not downloaded: ${summary.notDownloaded} | ` +
+          `💾 With original backup: ${summary.withOriginal}\n\n` +
+          JSON.stringify(statuses, null, 2)
+        ),
+      ]);
+    } catch (error) {
+      Logger.error(`MCP get_sync_status error: ${error}`);
+      return new vscode.LanguageModelToolResult([
+        new vscode.LanguageModelTextPart(`Error getting sync status: ${error}`),
+      ]);
+    }
+  }
+
+  /**
+   * Restore original server version to local working copy
+   */
+  private async _restoreOriginal(connectionName: string, remotePath: string): Promise<vscode.LanguageModelToolResult> {
+    const validation = this._validateConnection(connectionName);
+    if (validation.error) return validation.error;
+
+    if (!this._trackingService) {
+      return new vscode.LanguageModelToolResult([
+        new vscode.LanguageModelTextPart('Error: Tracking service not available.'),
+      ]);
+    }
+
+    const cleanPath = remotePath.replace(/^\/+/, '');
+
+    // Check if original exists
+    if (!this._trackingService.hasOriginal(connectionName, cleanPath)) {
+      return new vscode.LanguageModelToolResult([
+        new vscode.LanguageModelTextPart(
+          `Error: No original backup found for "${remotePath}" on "${connectionName}". ` +
+          `Original backups are created automatically when files are first modified via Copilot tools.`
+        ),
+      ]);
+    }
+
+    try {
+      const success = await this._trackingService.restoreOriginal(connectionName, remotePath);
+      if (success) {
+        const fileName = path.basename(remotePath);
+        return new vscode.LanguageModelToolResult([
+          new vscode.LanguageModelTextPart(
+            `Original version of "${fileName}" has been restored to the local working copy.\n` +
+            `The original backup is preserved in .sftp-plus/originals/ for future reference.\n` +
+            `To upload this restored version to the server, the user can use the SFTP+ sync feature.`
+          ),
+        ]);
+      } else {
+        return new vscode.LanguageModelToolResult([
+          new vscode.LanguageModelTextPart(`Error: Failed to restore original for "${remotePath}".`),
+        ]);
+      }
+    } catch (error) {
+      Logger.error(`MCP restore_original error: ${error}`);
+      return new vscode.LanguageModelToolResult([
+        new vscode.LanguageModelTextPart(`Error restoring original: ${error}`),
+      ]);
+    }
   }
 
   /**

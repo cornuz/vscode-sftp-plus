@@ -2,6 +2,37 @@
 
 All notable changes to the SFTP+ extension will be documented in this file.
 
+## [0.2.1] - 2026-02-11
+
+### Added
+
+- **💾 Original File Backup** - Server files are automatically backed up before any modification
+  - Immutable snapshot stored in `.sftp-plus/originals/{connection}/`
+  - Backup created on first edit only — never overwritten
+  - Works across all entry points: AI tools, right-click Download, prepare_edit
+
+- **🔄 New AI Tool: `get_sync_status`** - Returns sync status for all tracked files
+  - Shows: synced / local-newer / remote-newer / not-downloaded
+  - Includes file sizes, modification dates, and original backup status
+  - Enables AI orchestrators to monitor batch operation progress
+
+- **⏪ New AI Tool: `restore_original`** - Rollback to original server version
+  - Restores the pre-modification backup to the local working copy
+  - Original backup is preserved after restore for future reference
+
+- **📊 File metadata in `list_files`** - Results now include `size` (bytes) and `modified` (ISO date) for each file
+
+### Improved
+
+- **🛡️ MCP Connection Stability**
+  - Health check requires 3 consecutive failures before disconnecting (was 1)
+  - Health check timeout increased from 3s to 5s
+  - MCP suspend/resume: connection drops preserve AI write permissions
+  - Auto-resume MCP on reconnection with all permissions intact
+  - Drive accessibility retry (3 attempts × 2s) before failing
+  - `TEMPORARY:` error messages guide AI agents to retry instead of abandoning
+  - MCP state persisted in workspaceState across VS Code sessions
+
 ## [0.2.0] - 2026-01-29
 
 ### Added

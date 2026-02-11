@@ -7,3 +7,6 @@ dist/
 # SFTP+ local data
 .sftp-plus/
 .vscode/sftp_plus.json
+
+# Debug logs
+_logs/

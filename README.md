@@ -6,7 +6,7 @@
 
 **Full read/write access to SFTP/FTPS servers in VS Code with AI/Copilot integration**
 
-SFTP+ solves the read-only limitation of existing SFTP extensions by mounting remote servers as native Windows drives using [rclone](https://rclone.org/) and [WinFsp](https://winfsp.dev/). **NEW in v0.2.0**: MCP Server integration gives GitHub Copilot direct access to your remote files!
+SFTP+ solves the read-only limitation of existing SFTP extensions by mounting remote servers as native Windows drives using [rclone](https://rclone.org/) and [WinFsp](https://winfsp.dev/). **NEW in v0.2.1**: Original file backup, sync status tracking, and resilient MCP connections for AI-powered batch operations!
 
 ## Features
 
@@ -41,12 +41,14 @@ Once MCP is enabled, Copilot can use these tools:
 | Tool | Description |
 |------|-------------|
 | `sftp-plus_list_connections` | List all available SFTP/FTP connections |
-| `sftp-plus_list_files` | List files in a directory |
+| `sftp-plus_list_files` | List files with metadata (size, modified date) |
 | `sftp-plus_read_file` | Read file contents |
 | `sftp-plus_write_file` | Write/create files (requires write permission) |
 | `sftp-plus_prepare_edit` | Download file for local editing with diff preview |
 | `sftp-plus_search_files` | Search for files by pattern |
 | `sftp-plus_get_tree` | Get directory tree structure |
+| `sftp-plus_get_sync_status` | Get sync status of all tracked files |
+| `sftp-plus_restore_original` | Rollback a file to its original server version |
 
 ### Sync Status Indicators
 
@@ -58,6 +60,20 @@ Tracked files show their sync status with colors:
 ### Upload Changes
 
 After editing a local copy, right-click the file and select **"Upload to Host"** to sync your changes back to the server.
+
+### Original File Backup
+
+SFTP+ automatically backs up the original server version of every file before it's first modified — by an AI agent or a manual download. Backups are stored in `.sftp-plus/originals/` and are **never overwritten**, so you can always rollback to the pre-modification state.
+
+```
+.sftp-plus/
+├── tracking.json              # Sync metadata
+├── {connection}/              # Working copies (editable)
+│   └── path/to/file.php
+└── originals/                 # Immutable server snapshots
+    └── {connection}/
+        └── path/to/file.php
+```
 
 ## Prerequisites
 

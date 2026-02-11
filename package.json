@@ -2,7 +2,7 @@
   "name": "sftp-plus",
   "displayName": "SFTP+ MCP",
   "description": "Full read/write access to SFTP/FTPS servers with GitHub Copilot integration",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "cornuz-design",
   "author": {
     "name": "Raphael Cornuz",
@@ -150,7 +150,7 @@
         "displayName": "List Files",
         "toolReferenceName": "sftp-ls",
         "icon": "$(tools)",
-        "modelDescription": "Lists files and folders on a remote SFTP/FTP server. Supports recursive listing to get entire directory tree in one call. Use recursive=true for deep searches instead of calling list_files multiple times.",
+        "modelDescription": "Lists files and folders on a remote SFTP/FTP server. Returns JSON with name, type, path, size (bytes), and modified (ISO date) for each item. Supports recursive listing to get entire directory tree in one call. Use recursive=true with maxDepth for deep exploration instead of calling list_files multiple times.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -352,6 +352,46 @@
             }
           },
           "required": ["connectionName"]
+        }
+      },
+      {
+        "name": "sftp-plus_get_sync_status",
+        "displayName": "Get Sync Status",
+        "toolReferenceName": "sftp-sync-status",
+        "icon": "$(tools)",
+        "modelDescription": "Returns the sync status of all tracked files for a connection. Shows which files have been modified locally vs remotely, which have original server backups, file sizes, and modification dates. Use this to monitor progress during batch operations and verify modifications. Files are tracked automatically when using sftp-plus_prepare_edit.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "connectionName": {
+              "type": "string",
+              "description": "Name of the SFTP+ connection to check sync status for."
+            }
+          },
+          "required": ["connectionName"]
+        }
+      },
+      {
+        "name": "sftp-plus_restore_original",
+        "displayName": "Restore Original",
+        "toolReferenceName": "sftp-restore",
+        "icon": "$(tools)",
+        "modelDescription": "Restores the original server version of a file to the local working copy. Original backups are created automatically before the first modification via Copilot tools. The original backup is preserved after restore. Use this to rollback changes if something went wrong.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "connectionName": {
+              "type": "string",
+              "description": "Name of the SFTP+ connection."
+            },
+            "path": {
+              "type": "string",
+              "description": "Remote path of the file to restore. Example: '/var/www/config.json'"
+            }
+          },
+          "required": ["connectionName", "path"]
         }
       }
     ],

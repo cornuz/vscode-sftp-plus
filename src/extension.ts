@@ -53,7 +53,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   // Initialize MCP manager
   const mcpManager = new McpManager(connectionManager);
+  mcpManager.setWorkspaceState(context.workspaceState);
+  mcpManager.setTrackingService(trackingService);
   globalMcpManager = mcpManager;
+
+  // Restore MCP state from previous session
+  await mcpManager.restoreMcpState();
 
   // Pass MCP manager to host details provider for AI toggle
   hostDetailsProvider.setMcpManager(mcpManager);
@@ -81,11 +86,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     treeProvider.refresh();
     statusBarProvider.update();
 
-    // Stop MCP for connections that are no longer connected
+    // Handle MCP state for connections that changed status
     for (const name of mcpManager.getActiveMcpConnections()) {
       const conn = connectionManager.getConnection(name);
       if (!conn || conn.status !== ConnectionStatus.Connected) {
-        mcpManager.stopMcp(name).catch(err => Logger.error(`Failed to stop MCP for ${name}`, err));
+        // Connection dropped — suspend MCP (preserve state for auto-resume)
+        mcpManager.suspendMcp(name).catch(err => Logger.error(`Failed to suspend MCP for ${name}`, err));
+      }
+    }
+
+    // Auto-resume MCP for reconnected connections that were suspended
+    for (const name of mcpManager.getSuspendedMcpConnections()) {
+      const conn = connectionManager.getConnection(name);
+      if (conn && conn.status === ConnectionStatus.Connected) {
+        mcpManager.resumeMcp(name).catch(err => Logger.error(`Failed to resume MCP for ${name}`, err));
       }
     }
 

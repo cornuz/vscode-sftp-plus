@@ -97,8 +97,14 @@ export interface Connection {
   /** MCP server is active for this connection (runtime only) */
   mcpActive?: boolean;
 
+  /** MCP was active but connection dropped — will auto-resume on reconnect (runtime only) */
+  mcpSuspended?: boolean;
+
   /** Map of remote paths to their AI write mode: 'local' (green) or 'host' (red) */
   aiWritablePaths?: Map<string, 'local' | 'host'>;
+
+  /** Consecutive health check failures before marking disconnected (runtime only) */
+  healthCheckFailCount?: number;
 
   /** Obscured password for direct sync (runtime only, not persisted) */
   obscuredPassword?: string;

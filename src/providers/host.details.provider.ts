@@ -1702,6 +1702,13 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
       const relativePath = remotePath.substring(3); // Remove "Z:\"
       const localPath = path.join(workspaceRoot, '.sftp-plus', connectionName, relativePath);
 
+      // Backup original server version before any modification
+      const driveLetter = this._currentConnection.mountedDrive;
+      if (driveLetter) {
+        const cleanRelative = relativePath.replace(/\\/g, '/');
+        await this._trackingService.backupOriginal(connectionName, cleanRelative, driveLetter);
+      }
+
       // Ensure directory exists
       await fs.promises.mkdir(path.dirname(localPath), { recursive: true });
 

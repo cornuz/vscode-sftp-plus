@@ -29,6 +29,8 @@ export class ConnectionManager implements vscode.Disposable {
   private healthCheckInterval?: ReturnType<typeof setInterval>;
   /** Health check interval in milliseconds (default: 30 seconds) */
   private static readonly HEALTH_CHECK_INTERVAL_MS = 30000;
+  /** Number of consecutive health check failures before marking disconnected */
+  private static readonly HEALTH_CHECK_MAX_FAILURES = 3;
 
   private static readonly WORKSPACE_CONFIG_FILE = '.vscode/sftp_plus.json';
 
@@ -204,7 +206,7 @@ export class ConnectionManager implements vscode.Disposable {
 
   /**
    * Check health of all active connections
-   * Marks connections as disconnected if they're no longer responding
+   * Marks connections as disconnected only after multiple consecutive failures
    */
   private async checkConnectionsHealth(): Promise<void> {
     const activeConnections = this.getActiveConnections();
@@ -223,25 +225,41 @@ export class ConnectionManager implements vscode.Disposable {
       const isAlive = await this.rcloneService.isConnectionAlive(connection.rcPort);
 
       if (!isAlive) {
-        Logger.warn(`Connection "${connection.config.name}" is no longer responding`);
+        // Increment failure counter
+        connection.healthCheckFailCount = (connection.healthCheckFailCount || 0) + 1;
+        Logger.warn(
+          `Connection "${connection.config.name}" health check failed ` +
+          `(${connection.healthCheckFailCount}/${ConnectionManager.HEALTH_CHECK_MAX_FAILURES})`
+        );
 
-        // Mark as disconnected
-        connection.status = ConnectionStatus.Disconnected;
-        connection.mountedDrive = undefined;
-        connection.processId = undefined;
-        connection.rcPort = undefined;
-        connection.error = 'Connection lost';
-        hasChanges = true;
+        if (connection.healthCheckFailCount >= ConnectionManager.HEALTH_CHECK_MAX_FAILURES) {
+          // Exceeded threshold — mark as disconnected
+          Logger.warn(`Connection "${connection.config.name}" is no longer responding after ${connection.healthCheckFailCount} failures`);
 
-        // Notify user
-        vscode.window.showWarningMessage(
-          `SFTP+: Connection to "${connection.config.name}" was lost`,
-          'Reconnect'
-        ).then(selection => {
-          if (selection === 'Reconnect') {
-            vscode.commands.executeCommand('sftp-plus.connect', connection.config.name);
-          }
-        });
+          connection.status = ConnectionStatus.Disconnected;
+          connection.mountedDrive = undefined;
+          connection.processId = undefined;
+          connection.rcPort = undefined;
+          connection.error = 'Connection lost';
+          connection.healthCheckFailCount = 0;
+          hasChanges = true;
+
+          // Notify user
+          vscode.window.showWarningMessage(
+            `SFTP+: Connection to "${connection.config.name}" was lost`,
+            'Reconnect'
+          ).then(selection => {
+            if (selection === 'Reconnect') {
+              vscode.commands.executeCommand('sftp-plus.connect', connection.config.name);
+            }
+          });
+        }
+      } else {
+        // Connection is alive — reset failure counter
+        if (connection.healthCheckFailCount && connection.healthCheckFailCount > 0) {
+          Logger.info(`Connection "${connection.config.name}" recovered after ${connection.healthCheckFailCount} failure(s)`);
+          connection.healthCheckFailCount = 0;
+        }
       }
     }
 
