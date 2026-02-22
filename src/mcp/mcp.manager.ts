@@ -369,6 +369,16 @@ export class McpManager implements vscode.Disposable {
       })
     );
 
+    // Tool: reconnect - Reconnect a dropped or disconnected connection
+    this._disposables.push(
+      vscode.lm.registerTool('sftp-plus_reconnect', {
+        invoke: async (options, _token) => {
+          const input = options.input as { connectionName: string };
+          return this._reconnect(input.connectionName);
+        },
+      })
+    );
+
     this._toolsRegistered = true;
     Logger.info('SFTP+ Language Model Tools registered');
   }
@@ -802,6 +812,80 @@ export class McpManager implements vscode.Disposable {
   // ============================================
   // Tool Implementations
   // ============================================
+
+  /**
+   * Reconnect a dropped or disconnected connection.
+   * Usable by AI agents when a previous tool call returned a TEMPORARY connection error.
+   * Relies on credentials already stored in SecretStorage or workspace JSON.
+   * If no password is stored, VS Code will prompt the user.
+   */
+  private async _reconnect(connectionName: string): Promise<vscode.LanguageModelToolResult> {
+    const connection = this.connectionManager.getConnection(connectionName);
+
+    if (!connection) {
+      return new vscode.LanguageModelToolResult([
+        new vscode.LanguageModelTextPart(
+          `Error: Connection "${connectionName}" not found. Use sftp-plus_list_connections to see available connections.`
+        ),
+      ]);
+    }
+
+    if (connection.status === ConnectionStatus.Connected) {
+      return new vscode.LanguageModelToolResult([
+        new vscode.LanguageModelTextPart(
+          `Connection "${connectionName}" is already connected (drive ${connection.mountedDrive}:). No reconnection needed.`
+        ),
+      ]);
+    }
+
+    Logger.info(`MCP reconnect: initiating reconnect for "${connectionName}"`);
+
+    try {
+      await this.connectionManager.connect(connectionName);
+    } catch (error) {
+      // connect() shows its own error message to the user; surface it to the AI agent too
+      const message = error instanceof Error ? error.message : String(error);
+      Logger.error(`MCP reconnect: failed for "${connectionName}"`, error);
+      return new vscode.LanguageModelToolResult([
+        new vscode.LanguageModelTextPart(
+          `Error: Failed to reconnect "${connectionName}": ${message}. ` +
+          `Please ask the user to check their credentials or network and try again.`
+        ),
+      ]);
+    }
+
+    // Re-read connection state after connect attempt
+    const updated = this.connectionManager.getConnection(connectionName)!;
+
+    if (updated.status === ConnectionStatus.Connected) {
+      Logger.info(`MCP reconnect: "${connectionName}" reconnected on drive ${updated.mountedDrive}:`);
+
+      // Resume MCP if it was suspended
+      if (updated.mcpSuspended && !updated.mcpActive) {
+        updated.mcpActive = true;
+        updated.mcpSuspended = false;
+        this._persistMcpState();
+        this._onDidChangeMcpStatus.fire(connectionName);
+        Logger.info(`MCP auto-resumed for "${connectionName}" after reconnect`);
+      }
+
+      return new vscode.LanguageModelToolResult([
+        new vscode.LanguageModelTextPart(
+          `Success: Connection "${connectionName}" is now connected (drive ${updated.mountedDrive}:). ` +
+          `You can now retry the previous file operation.`
+        ),
+      ]);
+    }
+
+    // connect() resolved but connection is still not up (e.g. error state)
+    return new vscode.LanguageModelToolResult([
+      new vscode.LanguageModelTextPart(
+        `Error: Reconnection attempt for "${connectionName}" completed but the connection is still not active ` +
+        `(status: ${updated.status}${updated.error ? ', error: ' + updated.error : ''}). ` +
+        `Please ask the user to check the SFTP+ panel for details.`
+      ),
+    ]);
+  }
 
   /**
    * List all connections and their MCP status

@@ -2,7 +2,7 @@
   "name": "sftp-plus",
   "displayName": "SFTP+ MCP",
   "description": "Full read/write access to SFTP/FTPS servers with GitHub Copilot integration",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "publisher": "cornuz-design",
   "author": {
     "name": "Raphael Cornuz",
@@ -392,6 +392,24 @@
             }
           },
           "required": ["connectionName", "path"]
+        }
+      },
+      {
+        "name": "sftp-plus_reconnect",
+        "displayName": "Reconnect",
+        "toolReferenceName": "sftp-reconnect",
+        "icon": "$(debug-restart)",
+        "modelDescription": "Reconnects a dropped or disconnected SFTP/FTP connection. Call this tool when a previous tool call returned a TEMPORARY error indicating the connection was lost or suspended. If the password is already stored by SFTP+, reconnection happens automatically without user interaction. Returns success with the mounted drive letter on success, or the error message on failure.",
+        "canBeReferencedInPrompt": true,
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "connectionName": {
+              "type": "string",
+              "description": "Name of the SFTP+ connection to reconnect. Use sftp-plus_list_connections to see available connections."
+            }
+          },
+          "required": ["connectionName"]
         }
       }
     ],

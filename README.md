@@ -6,7 +6,7 @@
 
 **Full read/write access to SFTP/FTPS servers in VS Code with AI/Copilot integration**
 
-SFTP+ solves the read-only limitation of existing SFTP extensions by mounting remote servers as native Windows drives using [rclone](https://rclone.org/) and [WinFsp](https://winfsp.dev/). **NEW in v0.2.1**: Original file backup, sync status tracking, and resilient MCP connections for AI-powered batch operations!
+SFTP+ solves the read-only limitation of existing SFTP extensions by mounting remote servers as native Windows drives using [rclone](https://rclone.org/) and [WinFsp](https://winfsp.dev/). **NEW in v0.2.2**: The AI agent can now autonomously reconnect a dropped connection and resume its work without user intervention!
 
 ## Features
 
@@ -49,6 +49,7 @@ Once MCP is enabled, Copilot can use these tools:
 | `sftp-plus_get_tree` | Get directory tree structure |
 | `sftp-plus_get_sync_status` | Get sync status of all tracked files |
 | `sftp-plus_restore_original` | Rollback a file to its original server version |
+| `sftp-plus_reconnect` | Reconnect a dropped connection autonomously (no user action needed if credentials are stored) |
 
 ### Sync Status Indicators
 

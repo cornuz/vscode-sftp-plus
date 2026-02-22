@@ -2,6 +2,12 @@
 
 All notable changes to the SFTP+ extension will be documented in this file.
 
+## [0.2.2] - 2026-02-22
+
+### Added
+
+- **🔄 New AI Tool: `reconnect`** — Allows the AI agent to autonomously reconnect a dropped SFTP/FTP connection without user intervention, as long as credentials are already stored. The agent can detect a `TEMPORARY:` error from any file operation tool and immediately call `sftp-plus_reconnect` to restore the connection, then retry the operation — enabling fully autonomous multi-step workflows even when the connection is lost mid-task.
+
 ## [0.2.1] - 2026-02-11
 
 ### Added
