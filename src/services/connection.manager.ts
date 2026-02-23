@@ -440,6 +440,68 @@ export class ConnectionManager implements vscode.Disposable {
   }
 
   /**
+   * Reconnect to a server, reusing the obscured password cached from the previous session.
+   * This enables fully autonomous reconnection (no UI prompt) when the connection was previously
+   * established in the same VS Code session.
+   * Falls back to the normal connect() flow if no cached password is available.
+   */
+  async reconnect(name: string): Promise<void> {
+    const connection = this.connections.get(name);
+    if (!connection) {
+      throw new Error(`Connection "${name}" not found`);
+    }
+
+    if (connection.status === ConnectionStatus.Connected) {
+      Logger.info(`Already connected to ${name}`);
+      return;
+    }
+
+    // If the obscured password is still cached from the previous session, reuse it directly.
+    // This bypasses SecretStorage lookup and the UI prompt entirely.
+    if (connection.obscuredPassword) {
+      Logger.info(`Reconnecting to "${name}" using cached obscured password`);
+      try {
+        connection.status = ConnectionStatus.Connecting;
+        connection.error = undefined;
+        this._onDidChangeConnections.fire();
+
+        const driveLetter = connection.config.driveLetter || await DriveUtils.findAvailableDrive();
+        if (!driveLetter) {
+          throw new Error('No available drive letters');
+        }
+
+        const { process, rcPort } = this.rcloneService.mount(connection.config, connection.obscuredPassword, driveLetter);
+
+        const mounted = await this.waitForMount(driveLetter, 15000);
+        if (!mounted) {
+          throw new Error('Mount timed out — server may be unreachable');
+        }
+
+        connection.status = ConnectionStatus.Connected;
+        connection.mountedDrive = driveLetter;
+        connection.processId = process.pid;
+        connection.rcPort = rcPort;
+
+        Logger.info(`Reconnected to "${name}" on ${driveLetter}:`);
+        vscode.window.showInformationMessage(`SFTP+: Reconnected to ${name} (${driveLetter}:)`);
+
+      } catch (error) {
+        connection.status = ConnectionStatus.Error;
+        connection.error = error instanceof Error ? error.message : String(error);
+        Logger.error(`Failed to reconnect to "${name}"`, error);
+        vscode.window.showErrorMessage(`SFTP+: Failed to reconnect to ${name}: ${connection.error}`);
+      }
+
+      this._onDidChangeConnections.fire();
+      return;
+    }
+
+    // No cached obscured password — fall back to normal connect (may prompt the user for password)
+    Logger.info(`No cached password for "${name}", falling back to normal connect flow`);
+    await this.connect(name);
+  }
+
+  /**
    * Disconnect from a server
    */
   async disconnect(name: string): Promise<void> {

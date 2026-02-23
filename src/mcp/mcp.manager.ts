@@ -841,7 +841,7 @@ export class McpManager implements vscode.Disposable {
     Logger.info(`MCP reconnect: initiating reconnect for "${connectionName}"`);
 
     try {
-      await this.connectionManager.connect(connectionName);
+      await this.connectionManager.reconnect(connectionName);
     } catch (error) {
       // connect() shows its own error message to the user; surface it to the AI agent too
       const message = error instanceof Error ? error.message : String(error);
