@@ -2,6 +2,14 @@
 
 All notable changes to the SFTP+ extension will be documented in this file.
 
+## [0.2.3] - 2026-02-23
+
+### Fixed
+
+- **🤖 Agent autonomously reconnects without user intervention** — All `TEMPORARY:` error messages from file operation tools now include `ACTION REQUIRED: Call sftp-plus_reconnect` so the agent acts immediately instead of asking the user.
+- **🔄 Reconnect kills stale rclone process first** — Mirrors the UI "Reconnect" button: kills any lingering process before mounting fresh, avoiding drive-letter conflicts.
+- **🔑 Reconnect reuses cached password** — No UI password prompt during autonomous reconnection; the obscured password from the active session is reused directly.
+
 ## [0.2.2] - 2026-02-22
 
 ### Added
