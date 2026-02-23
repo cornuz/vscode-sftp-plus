@@ -12,6 +12,10 @@ All notable changes to the SFTP+ extension will be documented in this file.
 
 - **🔑 Autonomous reconnect actually works** — The previous `reconnect` tool called the same `connect()` path which, when the password was not in SecretStorage (e.g. entered interactively at first connect), would open a UI password prompt and block the agent indefinitely. A dedicated `reconnect()` method now reuses the **obscured password already cached in memory** from the previous session, bypassing the password lookup entirely. Falls back to the normal flow (with potential UI prompt) only if no cached password is available (e.g. after a VS Code restart).
 
+- **🔄 Reconnect now kills stale rclone process first** — Mirrors the UI "Reconnect" button: kills any lingering rclone process before mounting fresh, avoiding drive-letter conflicts.
+
+- **🤖 Agent now knows to call `sftp-plus_reconnect` on its own** — All `TEMPORARY:` error messages from file operation tools now include an explicit `ACTION REQUIRED: Call sftp-plus_reconnect` instruction. The tool `modelDescription` also directs the agent to call it immediately rather than asking the user. Previously the agent had no signal to trigger reconnect autonomously.
+
 ## [0.2.1] - 2026-02-11
 
 ### Added

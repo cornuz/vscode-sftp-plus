@@ -399,7 +399,7 @@
         "displayName": "Reconnect",
         "toolReferenceName": "sftp-reconnect",
         "icon": "$(debug-restart)",
-        "modelDescription": "Reconnects a dropped or disconnected SFTP/FTP connection. Call this tool when a previous tool call returned a TEMPORARY error indicating the connection was lost or suspended. If the password is already stored by SFTP+, reconnection happens automatically without user interaction. Returns success with the mounted drive letter on success, or the error message on failure.",
+        "modelDescription": "AUTONOMOUS RECONNECT: Call this tool IMMEDIATELY whenever any other sftp-plus tool returns a TEMPORARY error or says 'ACTION REQUIRED: Call sftp-plus_reconnect'. This restores the dropped SFTP/FTP connection without any user interaction (the password is reused from the active session cache). After a successful reconnect, retry the failed operation. Do NOT ask the user to reconnect manually — use this tool first.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",

@@ -167,9 +167,8 @@ export class McpManager implements vscode.Disposable {
         connection: null,
         error: new vscode.LanguageModelToolResult([
           new vscode.LanguageModelTextPart(
-            `TEMPORARY: The SFTP connection "${connectionName}" was temporarily lost and is reconnecting. ` +
-            `MCP access will auto-resume once the connection is restored. ` +
-            `Please ask the user to reconnect via the SFTP+ panel, then retry this tool call in ~10 seconds.`
+            `TEMPORARY: The SFTP connection "${connectionName}" was temporarily lost. ` +
+            `ACTION REQUIRED: Call sftp-plus_reconnect with connectionName="${connectionName}" NOW to restore the connection autonomously, then retry this tool call.`
           ),
         ]),
       };
@@ -193,7 +192,7 @@ export class McpManager implements vscode.Disposable {
         error: new vscode.LanguageModelToolResult([
           new vscode.LanguageModelTextPart(
             `TEMPORARY: Connection "${connectionName}" is not currently connected/mounted. ` +
-            `Please ask the user to reconnect via the SFTP+ panel, then retry this tool call in ~10 seconds.`
+            `ACTION REQUIRED: Call sftp-plus_reconnect with connectionName="${connectionName}" NOW to restore the connection autonomously, then retry this tool call.`
           ),
         ]),
       };
@@ -232,8 +231,8 @@ export class McpManager implements vscode.Disposable {
     return new vscode.LanguageModelToolResult([
       new vscode.LanguageModelTextPart(
         `TEMPORARY: Drive ${connection.mountedDrive}: is not accessible after ${maxAttempts} attempts. ` +
-        `The SFTP connection may have been temporarily disrupted. ` +
-        `Please ask the user to check the connection in the SFTP+ panel, then retry this tool call in ~10 seconds.`
+        `The SFTP connection was disrupted. ` +
+        `ACTION REQUIRED: Call sftp-plus_reconnect with connectionName="${connectionName}" NOW to restore the connection autonomously, then retry this tool call.`
       ),
     ]);
   }

@@ -440,10 +440,13 @@ export class ConnectionManager implements vscode.Disposable {
   }
 
   /**
-   * Reconnect to a server, reusing the obscured password cached from the previous session.
-   * This enables fully autonomous reconnection (no UI prompt) when the connection was previously
-   * established in the same VS Code session.
-   * Falls back to the normal connect() flow if no cached password is available.
+   * Reconnect to a server — mirrors the UI "Reconnect" button behaviour:
+   * kills any stale rclone process first, then mounts fresh.
+   *
+   * Uses the obscured password cached in memory from the previous session so no
+   * UI prompt is shown (fully autonomous when called from an AI agent).
+   * Falls back to the normal connect() flow only if no cached password exists
+   * (e.g. after a VS Code restart), which may prompt the user.
    */
   async reconnect(name: string): Promise<void> {
     const connection = this.connections.get(name);
@@ -461,10 +464,28 @@ export class ConnectionManager implements vscode.Disposable {
     if (connection.obscuredPassword) {
       Logger.info(`Reconnecting to "${name}" using cached obscured password`);
       try {
+        // ── Step 1: kill any stale rclone process (same as UI Reconnect button) ──
+        if (connection.processId) {
+          try {
+            await this.rcloneService.unmount(connection.processId);
+            Logger.info(`Killed stale rclone process ${connection.processId} for "${name}"`);
+          } catch {
+            Logger.warn(`Could not kill stale rclone process ${connection.processId} for "${name}" — continuing anyway`);
+          }
+        }
+
+        // Wait briefly for OS to release the drive letter (mirrors the 500 ms delay in the UI button)
+        await new Promise(resolve => setTimeout(resolve, 500));
+
+        // ── Step 2: reset state ──
         connection.status = ConnectionStatus.Connecting;
         connection.error = undefined;
+        connection.mountedDrive = undefined;
+        connection.processId = undefined;
+        connection.rcPort = undefined;
         this._onDidChangeConnections.fire();
 
+        // ── Step 3: mount fresh ──
         const driveLetter = connection.config.driveLetter || await DriveUtils.findAvailableDrive();
         if (!driveLetter) {
           throw new Error('No available drive letters');
