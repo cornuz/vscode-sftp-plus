@@ -2,6 +2,22 @@
 
 All notable changes to the SFTP+ extension will be documented in this file.
 
+## [0.2.5] - 2026-03-13
+
+### Added
+
+- **🔍 Native Compare for tracked files** — Out-of-sync tracked files can now be opened in a native VS Code diff between the local working copy and the mounted host version.
+- **🤖 Review with Agent** — When MCP is active on a host, tracked out-of-sync files now expose a dedicated `Review with Agent` action that opens the local file and asks the active agent to propose reviewable edits against the host version.
+
+### Improved
+
+- **🛡️ Safer sync actions in the file browser** — `Download` is now only offered when the host is newer or the file is not downloaded; `Upload` is only offered when the local tracked file is newer.
+- **⚡ Immediate tracked-file refresh** — The host file tree now refreshes tracked statuses as soon as local tracked files are saved, created, or deleted under `.sftp-plus/{connection}/...`.
+
+### Fixed
+
+- **📝 Same-size local edits are now detected correctly** — A local modification that keeps the exact same file size no longer stays falsely `synced`; the tracking logic now detects the change and marks the file `local-newer` or `remote-newer` correctly.
+
 ## [0.2.4] - 2026-03-13
 
 ### Added

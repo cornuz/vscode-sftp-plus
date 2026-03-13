@@ -54,6 +54,24 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
     private readonly _connectionManager: ConnectionManager
   ) {
     this._trackingService = new TrackingService();
+
+    vscode.workspace.onDidSaveTextDocument((document) => {
+      if (this._shouldRefreshForTrackedLocalPath(document.uri.fsPath)) {
+        void this.refreshTrackedFiles();
+      }
+    });
+
+    vscode.workspace.onDidCreateFiles((event) => {
+      if (event.files.some(file => this._shouldRefreshForTrackedLocalPath(file.fsPath))) {
+        void this.refreshTrackedFiles();
+      }
+    });
+
+    vscode.workspace.onDidDeleteFiles((event) => {
+      if (event.files.some(file => this._shouldRefreshForTrackedLocalPath(file.fsPath))) {
+        void this.refreshTrackedFiles();
+      }
+    });
   }
 
   /**
@@ -241,6 +259,27 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
     await this._updateView();
   }
 
+  private _shouldRefreshForTrackedLocalPath(filePath: string): boolean {
+    if (
+      !this._currentConnection ||
+      this._currentTab !== 'files' ||
+      this._currentConnection.status !== ConnectionStatus.Connected
+    ) {
+      return false;
+    }
+
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!workspaceRoot) {
+      return false;
+    }
+
+    const trackedRoot = path.join(workspaceRoot, '.sftp-plus', this._currentConnection.config.name);
+    const normalizedFilePath = path.normalize(filePath).toLowerCase();
+    const normalizedTrackedRoot = path.normalize(trackedRoot).toLowerCase();
+
+    return normalizedFilePath === normalizedTrackedRoot || normalizedFilePath.startsWith(`${normalizedTrackedRoot}${path.sep}`);
+  }
+
   private _revealView(): void {
     if (this._view) {
       this._view.show?.(true);
@@ -352,6 +391,14 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
           } else {
             await this._uploadFile(message.path);
           }
+          break;
+
+        case 'compareFile':
+          await this._compareFile(message.path);
+          break;
+
+        case 'reviewWithAgent':
+          await this._reviewWithAgent(message.path);
           break;
 
         case 'renameFile':
@@ -1580,6 +1627,8 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
     const sizeActiveClass = this._showFileSize ? 'active' : '';
     const dateActiveClass = this._showFileDate ? 'active' : '';
 
+    const showAgentReview = this._currentConnection?.mcpActive === true;
+
     return `
       <div class="file-browser-container">
         <div class="browser-toolbar">
@@ -1607,6 +1656,15 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
             <span class="codicon codicon-cloud-download"></span>
             <span>Download</span>
           </div>
+          <div class="context-menu-item" data-action="compare">
+            <span class="codicon codicon-compare-changes"></span>
+            <span>Compare</span>
+          </div>
+          ${showAgentReview ? `
+          <div class="context-menu-item" data-action="reviewWithAgent">
+            <span class="codicon codicon-copilot"></span>
+            <span>Review with Agent</span>
+          </div>` : ''}
           <div class="context-menu-item" data-action="upload">
             <span class="codicon codicon-cloud-upload"></span>
             <span>Upload</span>
@@ -1941,6 +1999,108 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
     } catch (error) {
       Logger.error('Failed to upload file:', error);
       vscode.window.showErrorMessage(`Failed to upload file: ${error}`);
+    }
+  }
+
+  /**
+   * Compare the local tracked file with the mounted host file using VS Code diff
+   */
+  private async _compareFile(remotePath: string): Promise<void> {
+    try {
+      const trackedInfo = this._trackedFiles.get(remotePath);
+      if (!trackedInfo) {
+        vscode.window.showErrorMessage('Compare is only available for tracked files');
+        return;
+      }
+
+      const status = trackedInfo.status;
+      if (status !== SyncStatus.LocalNewer && status !== SyncStatus.RemoteNewer) {
+        vscode.window.showInformationMessage('Compare is only available when the local and host versions differ');
+        return;
+      }
+
+      const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      if (!workspaceRoot) {
+        vscode.window.showErrorMessage('No workspace folder open. Please open a folder first.');
+        return;
+      }
+
+      const localFullPath = path.join(workspaceRoot, trackedInfo.file.localPath);
+      if (!fs.existsSync(localFullPath) || !fs.existsSync(trackedInfo.file.fullRemotePath)) {
+        vscode.window.showErrorMessage('Compare requires both the local tracked file and the mounted host file');
+        return;
+      }
+
+      const title = `Compare: ${path.basename(remotePath)} (Local ↔ Host)`;
+      await vscode.commands.executeCommand(
+        'vscode.diff',
+        vscode.Uri.file(localFullPath),
+        vscode.Uri.file(trackedInfo.file.fullRemotePath),
+        title,
+        { preview: true }
+      );
+    } catch (error) {
+      Logger.error('Failed to compare file:', error);
+      vscode.window.showErrorMessage(`Failed to compare file: ${error}`);
+    }
+  }
+
+  /**
+   * Ask the active agent to review host differences by proposing edits on the local tracked file.
+   */
+  private async _reviewWithAgent(remotePath: string): Promise<void> {
+    const trackedInfo = this._trackedFiles.get(remotePath);
+    if (!trackedInfo) {
+      vscode.window.showErrorMessage('Agent review is only available for tracked files');
+      return;
+    }
+
+    if (trackedInfo.status !== SyncStatus.LocalNewer && trackedInfo.status !== SyncStatus.RemoteNewer) {
+      vscode.window.showInformationMessage('Agent review is only available when the local and host versions differ');
+      return;
+    }
+
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!workspaceRoot || !this._currentConnection) {
+      vscode.window.showErrorMessage('No workspace folder open. Please open a folder first.');
+      return;
+    }
+
+    const localFullPath = path.join(workspaceRoot, trackedInfo.file.localPath);
+    if (!fs.existsSync(localFullPath) || !fs.existsSync(trackedInfo.file.fullRemotePath)) {
+      vscode.window.showErrorMessage('Agent review requires both the local tracked file and the mounted host file');
+      return;
+    }
+
+    const localUri = vscode.Uri.file(localFullPath);
+    const localDocument = await vscode.workspace.openTextDocument(localUri);
+    await vscode.window.showTextDocument(localDocument, { preview: false });
+
+    const prompt = [
+      `Review the differences between the local tracked file and the current host version for connection "${this._currentConnection.config.name}".`,
+      `Target the already opened local workspace file at "${localFullPath}".`,
+      `Use the host file "${trackedInfo.file.remotePath}" on that SFTP+ connection as the reference version to compare against.`,
+      `The current detected sync status is "${trackedInfo.status}".`,
+      'Do not modify the host file and do not upload anything.',
+      'If there are meaningful differences, use standard Copilot edit tools on the local file only so the user gets accept/reject review changes directly in VS Code.',
+      'Only propose changes that reflect the host-only differences, keep identical lines untouched, and briefly explain the most critical differences first in chat.'
+    ].join(' ');
+
+    try {
+      await vscode.commands.executeCommand('workbench.action.chat.open', {
+        mode: 'agent',
+        query: prompt,
+        isPartialQuery: false,
+      });
+    } catch (error) {
+      Logger.warn(`Falling back to native diff because chat open failed: ${error instanceof Error ? error.message : String(error)}`);
+      await vscode.commands.executeCommand(
+        'vscode.diff',
+        vscode.Uri.file(localFullPath),
+        vscode.Uri.file(trackedInfo.file.fullRemotePath),
+        `Compare: ${path.basename(trackedInfo.file.remotePath)} (Local ↔ Host)`,
+        { preview: true }
+      );
     }
   }
 
@@ -2482,17 +2642,29 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
           const allFiles = areAllSelectedFiles();
           const selectedItems = Array.from(document.querySelectorAll('.file-item.selected'));
           const allLocalNewer = selectedItems.length > 0 && selectedItems.every(el => el.classList.contains('local-newer'));
+          const allDownloadSafe = selectedItems.length > 0 && selectedItems.every(el => {
+            if (!el.classList.contains('tracked')) {
+              return true;
+            }
+            return el.classList.contains('remote-newer') || el.classList.contains('not-downloaded');
+          });
+          const singleTrackedOutOfSync = selectedItems.length === 1 &&
+            (selectedItems[0].classList.contains('local-newer') || selectedItems[0].classList.contains('remote-newer'));
 
           // Show/hide menu items based on selection
           const cloudEditItem = document.querySelector('[data-action="cloudEdit"]');
           const downloadItem = document.querySelector('[data-action="download"]');
+          const compareItem = document.querySelector('[data-action="compare"]');
+          const reviewWithAgentItem = document.querySelector('[data-action="reviewWithAgent"]');
           const uploadItem = document.querySelector('[data-action="upload"]');
           const renameItem = document.querySelector('[data-action="rename"]');
           const duplicateItem = document.querySelector('[data-action="duplicate"]');
 
-          // Cloud Edit, Download: only for files (single or multi)
+          // Cloud Edit: only for files (single or multi)
           if (cloudEditItem) cloudEditItem.style.display = allFiles ? 'flex' : 'none';
-          if (downloadItem) downloadItem.style.display = allFiles ? 'flex' : 'none';
+          if (downloadItem) downloadItem.style.display = (allFiles && allDownloadSafe) ? 'flex' : 'none';
+          if (compareItem) compareItem.style.display = (allFiles && singleTrackedOutOfSync) ? 'flex' : 'none';
+          if (reviewWithAgentItem) reviewWithAgentItem.style.display = (allFiles && singleTrackedOutOfSync) ? 'flex' : 'none';
           if (uploadItem) uploadItem.style.display = (allFiles && allLocalNewer) ? 'flex' : 'none';
 
           // Rename, Duplicate: only for single selection
@@ -2505,6 +2677,12 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
           }
           if (downloadItem) {
             downloadItem.querySelector('span:last-child').textContent = multiSelect ? 'Download (' + selectedPaths.length + ')' : 'Download';
+          }
+          if (compareItem) {
+            compareItem.querySelector('span:last-child').textContent = 'Compare';
+          }
+          if (reviewWithAgentItem) {
+            reviewWithAgentItem.querySelector('span:last-child').textContent = 'Review with Agent';
           }
           if (uploadItem) {
             uploadItem.querySelector('span:last-child').textContent = multiSelect ? 'Upload (' + selectedPaths.length + ')' : 'Upload';
@@ -2570,6 +2748,10 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
               } else {
                 vscode.postMessage({ command: 'downloadFile', path: filePath });
               }
+            } else if (action === 'compare') {
+              vscode.postMessage({ command: 'compareFile', path: filePath });
+            } else if (action === 'reviewWithAgent') {
+              vscode.postMessage({ command: 'reviewWithAgent', path: filePath });
             } else if (action === 'upload') {
               if (isMultiSelect) {
                 vscode.postMessage({ command: 'uploadFile', paths: selectedPaths });

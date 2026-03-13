@@ -306,27 +306,34 @@ export class TrackingService {
         return SyncStatus.Error;
       }
 
-      // Compare by file size first, then by date if sizes differ
+      // Compare size and timestamps first, then fall back to content when needed.
       const localStats = await fs.promises.stat(localFullPath);
       const remoteStats = await fs.promises.stat(trackedFile.fullRemotePath);
 
       const localSize = localStats.size;
       const remoteSize = remoteStats.size;
-
-      if (localSize === remoteSize) {
-        // Same size = consider as synced (content is identical)
-        return SyncStatus.Synced;
-      }
-
-      // Different sizes = compare modification times to determine which is newer
       const localMtime = localStats.mtime.getTime();
       const remoteMtime = remoteStats.mtime.getTime();
 
-      if (remoteMtime > localMtime) {
-        return SyncStatus.RemoteNewer;
-      } else {
-        return SyncStatus.LocalNewer;
+      if (localSize === remoteSize) {
+        // Same size is not enough: a same-length edit must still become local-newer.
+        if (localMtime === remoteMtime) {
+          return SyncStatus.Synced;
+        }
+
+        const [localContent, remoteContent] = await Promise.all([
+          fs.promises.readFile(localFullPath),
+          fs.promises.readFile(trackedFile.fullRemotePath),
+        ]);
+
+        if (localContent.equals(remoteContent)) {
+          return SyncStatus.Synced;
+        }
+
+        return localMtime > remoteMtime ? SyncStatus.LocalNewer : SyncStatus.RemoteNewer;
       }
+
+      return remoteMtime > localMtime ? SyncStatus.RemoteNewer : SyncStatus.LocalNewer;
     } catch (error) {
       Logger.error('Failed to get sync status:', error);
       return SyncStatus.Error;

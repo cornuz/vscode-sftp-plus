@@ -6,7 +6,7 @@
 
 **Full read/write access to SFTP/FTPS servers in VS Code with AI/Copilot integration**
 
-SFTP+ solves the read-only limitation of existing SFTP extensions by mounting remote servers as native Windows drives using [rclone](https://rclone.org/) and [WinFsp](https://winfsp.dev/). **NEW in v0.2.4**: FTPS certificate issues are now diagnosable directly in the host console, dropped MCP sessions expose explicit recovery actions, and tracked `local-newer` files can be uploaded back to the host from the built-in file browser.
+SFTP+ solves the read-only limitation of existing SFTP extensions by mounting remote servers as native Windows drives using [rclone](https://rclone.org/) and [WinFsp](https://winfsp.dev/). **NEW in v0.2.5**: out-of-sync tracked files can now be compared visually in VS Code, optionally reviewed by the active MCP agent, and same-size local edits are detected correctly as `local-newer`.
 
 ## Features
 
@@ -21,6 +21,8 @@ SFTP+ solves the read-only limitation of existing SFTP extensions by mounting re
 - 📊 **Status Bar** - See active connections at a glance
 - 🌳 **Tree View** - Manage connections from the activity bar
 - 📂 **File Browser** - Browse remote files directly in VS Code
+- 🔍 **Visual Compare** - Open a native VS Code diff between local tracked files and the mounted host version
+- 🤖 **Agent Review From Compare** - Ask the active MCP agent to review host differences against the opened local file
 - ⚙️ **Hybrid Config** - Store connections globally or per-workspace
 
 ## 🤖 Copilot Integration
@@ -62,6 +64,21 @@ Tracked files show their sync status with colors:
 - 🔴 **Red** - Remote is newer (needs download)
 - 🔵 **Blue** - Local is newer (needs upload)
 - 🟢 **Green** - Synced
+
+Local edits are detected even when the file size stays exactly the same. A small change like replacing `6` with `4` now correctly switches the tracked file to `local-newer`.
+
+### Compare And Review
+
+For tracked files that are out of sync:
+
+- **Compare** opens a native VS Code side-by-side diff between the local tracked file and the currently mounted host version.
+- **Review with Agent** appears when MCP is active for the host. It opens the local tracked file and asks the active agent to review host differences by proposing edits on the local file only, so you can accept or reject them through the normal Copilot review flow.
+
+To avoid accidental overwrite actions:
+
+- **Download** is only shown when the host is newer or the file is not downloaded locally.
+- **Upload** is only shown when the local tracked file is newer.
+- Compare/review actions are shown only for single-file tracked selections that are out of sync.
 
 ### Upload Changes
 
