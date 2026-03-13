@@ -2,7 +2,7 @@
   "name": "sftp-plus",
   "displayName": "SFTP+ MCP",
   "description": "Full read/write access to SFTP/FTPS servers with GitHub Copilot integration",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "publisher": "cornuz-design",
   "author": {
     "name": "Raphael Cornuz",
@@ -138,7 +138,7 @@
         "displayName": "List Connections",
         "toolReferenceName": "sftp-connections",
         "icon": "$(tools)",
-        "modelDescription": "Lists all SFTP/FTP connections configured in SFTP+ extension and their MCP (Copilot access) status. Use this to discover available remote servers before accessing files.",
+        "modelDescription": "Lists all SFTP/FTP connections configured in SFTP+ together with their MCP state, mounted drive, autonomous reconnect availability, and an explicit recoveryAction field. Always use this to discover whether a host is ready, whether MCP is suspended, and whether you should call sftp-plus_reconnect immediately or ask the user for manual reconnect.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -359,7 +359,7 @@
         "displayName": "Get Sync Status",
         "toolReferenceName": "sftp-sync-status",
         "icon": "$(tools)",
-        "modelDescription": "Returns the sync status of all tracked files for a connection. Shows which files have been modified locally vs remotely, which have original server backups, file sizes, and modification dates. Use this to monitor progress during batch operations and verify modifications. Files are tracked automatically when using sftp-plus_prepare_edit.",
+        "modelDescription": "Returns all locally tracked files for a connection together with their exact local-vs-host sync state. Each tracked file includes one of these statuses: synced, local-newer, remote-newer, not-downloaded, or error, plus local/remote paths, sizes, modification dates, and backup information. Use this whenever you need to know which files already exist locally and whether local or host is newer. Files are tracked automatically when using sftp-plus_prepare_edit.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -399,7 +399,7 @@
         "displayName": "Reconnect",
         "toolReferenceName": "sftp-reconnect",
         "icon": "$(debug-restart)",
-        "modelDescription": "AUTONOMOUS RECONNECT: Call this tool IMMEDIATELY whenever any other sftp-plus tool returns a TEMPORARY error or says 'ACTION REQUIRED: Call sftp-plus_reconnect'. This restores the dropped SFTP/FTP connection without any user interaction (the password is reused from the active session cache). After a successful reconnect, retry the failed operation. Do NOT ask the user to reconnect manually — use this tool first.",
+        "modelDescription": "AUTONOMOUS RECONNECT: Call this tool IMMEDIATELY whenever any other sftp-plus tool returns a TEMPORARY error or says 'ACTION REQUIRED: Call sftp-plus_reconnect'. This tool only succeeds when session credentials are still cached in memory; in that case it reconnects without user interaction. If cached session credentials are unavailable, the tool will explicitly tell you that manual user reconnect is required. After a successful reconnect, retry the failed operation.",
         "canBeReferencedInPrompt": true,
         "inputSchema": {
           "type": "object",
@@ -593,12 +593,17 @@
               "ignoreCertErrors": {
                 "type": "boolean",
                 "default": false,
-                "description": "Ignore SSL certificate errors (for self-signed certs)"
+                "description": "Auto-accept invalid FTPS certificates by skipping TLS certificate validation"
               },
               "autoConnect": {
                 "type": "boolean",
                 "default": false,
                 "description": "Auto-connect when VS Code starts"
+              },
+              "autoReconnectOnDrop": {
+                "type": "boolean",
+                "default": false,
+                "description": "Auto-reconnect when an established connection drops unexpectedly"
               },
               "cacheMode": {
                 "type": "string",

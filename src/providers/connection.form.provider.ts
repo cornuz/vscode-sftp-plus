@@ -391,12 +391,17 @@ export class ConnectionFormProvider implements vscode.WebviewViewProvider {
 
       <div class="checkbox-group">
         <input type="checkbox" id="ignoreCertErrors">
-        <label for="ignoreCertErrors">Ignore certificate errors</label>
+        <label for="ignoreCertErrors">Auto-accept invalid certificate (FTPS)</label>
       </div>
 
       <div class="checkbox-group">
         <input type="checkbox" id="autoConnect">
         <label for="autoConnect">Auto-connect on startup</label>
+      </div>
+
+      <div class="checkbox-group">
+        <input type="checkbox" id="autoReconnectOnDrop">
+        <label for="autoReconnectOnDrop">Auto-reconnect on unattended disconnection</label>
       </div>
     </div>
 
@@ -450,6 +455,7 @@ export class ConnectionFormProvider implements vscode.WebviewViewProvider {
       explicitTls: document.getElementById('explicitTls'),
       ignoreCertErrors: document.getElementById('ignoreCertErrors'),
       autoConnect: document.getElementById('autoConnect'),
+      autoReconnectOnDrop: document.getElementById('autoReconnectOnDrop'),
       cacheMode: document.getElementById('cacheMode'),
       idleTimeout: document.getElementById('idleTimeout'),
     };
@@ -496,6 +502,7 @@ export class ConnectionFormProvider implements vscode.WebviewViewProvider {
         explicitTls: fields.explicitTls.checked,
         ignoreCertErrors: fields.ignoreCertErrors.checked,
         autoConnect: fields.autoConnect.checked,
+        autoReconnectOnDrop: fields.autoReconnectOnDrop.checked,
         cacheMode: fields.cacheMode.value,
         idleTimeout: fields.idleTimeout.value.trim() || '5m',
       };
@@ -538,6 +545,7 @@ export class ConnectionFormProvider implements vscode.WebviewViewProvider {
       fields.explicitTls.checked = config.explicitTls !== false;
       fields.ignoreCertErrors.checked = config.ignoreCertErrors === true;
       fields.autoConnect.checked = config.autoConnect === true;
+      fields.autoReconnectOnDrop.checked = config.autoReconnectOnDrop === true;
       fields.cacheMode.value = config.cacheMode || 'full';
       fields.idleTimeout.value = config.idleTimeout || '5m';
     }

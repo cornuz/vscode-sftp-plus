@@ -2,6 +2,25 @@
 
 All notable changes to the SFTP+ extension will be documented in this file.
 
+## [0.2.4] - 2026-03-13
+
+### Added
+
+- **🖥️ Host session console** — Each host now has a persistent session console in Details with test/connect/reconnect/disconnect logs kept for the full VS Code session, including separators between runs.
+- **🔄 Auto-reconnect on unattended disconnection** — New per-connection option to automatically reconnect when a mounted host drops unexpectedly.
+- **⬆️ Upload action in host file browser** — Tracked files marked `local-newer` can now be uploaded directly from the SFTP+ file browser context menu.
+
+### Improved
+
+- **🔐 FTPS certificate recovery UX** — FTPS test/connect flows now classify certificate failures, surface them in the console, and offer an explicit UI path to enable certificate auto-accept.
+- **🤖 MCP recovery guidance** — `list_connections` now exposes MCP state, autonomous reconnect availability, and explicit `recoveryAction` / `recoveryHint` fields so the agent can decide whether to reconnect immediately or ask for manual intervention.
+- **📊 MCP tool availability after reload** — Language model tools are now registered eagerly at activation, improving discoverability before a host is manually resumed.
+
+### Fixed
+
+- **🛑 Removed hardcoded FTPS certificate bypass** — FTPS mounts no longer skip TLS validation unless `ignoreCertErrors` is explicitly enabled.
+- **🔁 Autonomous reconnect after reload** — MCP reconnect can now recover using stored credentials when the in-memory session cache is gone, and temporary drive-drop errors are normalized into reconnect instructions.
+
 ## [0.2.3] - 2026-02-23
 
 ### Fixed

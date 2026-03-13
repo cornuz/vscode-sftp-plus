@@ -6,15 +6,18 @@
 
 **Full read/write access to SFTP/FTPS servers in VS Code with AI/Copilot integration**
 
-SFTP+ solves the read-only limitation of existing SFTP extensions by mounting remote servers as native Windows drives using [rclone](https://rclone.org/) and [WinFsp](https://winfsp.dev/). **NEW in v0.2.2**: The AI agent can now autonomously reconnect a dropped connection and resume its work without user intervention!
+SFTP+ solves the read-only limitation of existing SFTP extensions by mounting remote servers as native Windows drives using [rclone](https://rclone.org/) and [WinFsp](https://winfsp.dev/). **NEW in v0.2.4**: FTPS certificate issues are now diagnosable directly in the host console, dropped MCP sessions expose explicit recovery actions, and tracked `local-newer` files can be uploaded back to the host from the built-in file browser.
 
 ## Features
 
 - 🤖 **Copilot Integration** - Give GitHub Copilot read/write access to remote files
 - 🔌 **Connect/Disconnect** - Mount FTPS/SFTP servers as Windows drives
 - 📁 **Full Read/Write** - Edit files directly, changes sync automatically
+- 🖥️ **Session Console** - Inspect test/connect/reconnect logs per host in the Details view
+- 🔐 **FTPS Certificate Recovery** - Detect certificate failures and enable auto-accept from the UI
 - 🔐 **Secure Credentials** - Passwords stored in VS Code's secure storage
 - 🚀 **Auto-Connect** - Optionally connect on VS Code startup
+- 🔄 **Auto-Reconnect On Drop** - Restore an established connection after unattended disconnects
 - 📊 **Status Bar** - See active connections at a glance
 - 🌳 **Tree View** - Manage connections from the activity bar
 - 📂 **File Browser** - Browse remote files directly in VS Code
@@ -40,7 +43,7 @@ Once MCP is enabled, Copilot can use these tools:
 
 | Tool | Description |
 |------|-------------|
-| `sftp-plus_list_connections` | List all available SFTP/FTP connections |
+| `sftp-plus_list_connections` | List connections, MCP state, mounted drive, and explicit recovery action |
 | `sftp-plus_list_files` | List files with metadata (size, modified date) |
 | `sftp-plus_read_file` | Read file contents |
 | `sftp-plus_write_file` | Write/create files (requires write permission) |
@@ -49,7 +52,9 @@ Once MCP is enabled, Copilot can use these tools:
 | `sftp-plus_get_tree` | Get directory tree structure |
 | `sftp-plus_get_sync_status` | Get sync status of all tracked files |
 | `sftp-plus_restore_original` | Rollback a file to its original server version |
-| `sftp-plus_reconnect` | Reconnect a dropped connection autonomously (no user action needed if credentials are stored) |
+| `sftp-plus_reconnect` | Reconnect a dropped connection autonomously when stored credentials are available |
+
+`sftp-plus_list_connections` now returns `recoveryAction`, `recoveryHint`, and `autonomousReconnectAvailable` so the agent can distinguish between immediate reconnect, manual reconnect, and no-op states after a drop or VS Code reload.
 
 ### Sync Status Indicators
 
@@ -60,7 +65,7 @@ Tracked files show their sync status with colors:
 
 ### Upload Changes
 
-After editing a local copy, right-click the file and select **"Upload to Host"** to sync your changes back to the server.
+After editing a local copy, right-click the file and select **"Upload"** in the SFTP+ file browser, or use **"Upload to Host"** from the Explorer/editor commands, to sync your changes back to the server.
 
 ### Original File Backup
 
@@ -119,8 +124,9 @@ winget install WinFsp.WinFsp
 | `remotePath` | string | "/" | Remote path to mount |
 | `driveLetter` | string | auto | Windows drive letter (e.g., "Z") |
 | `explicitTls` | boolean | true | Use explicit TLS for FTPS |
-| `ignoreCertErrors` | boolean | false | Ignore SSL certificate errors |
+| `ignoreCertErrors` | boolean | false | Auto-accept invalid FTPS certificates by skipping TLS validation |
 | `autoConnect` | boolean | false | Connect on VS Code startup |
+| `autoReconnectOnDrop` | boolean | false | Auto-reconnect when an established connection drops unexpectedly |
 | `cacheMode` | string | "full" | VFS cache mode |
 | `idleTimeout` | string | "0" | Keep-alive timeout (0 = disabled) |
 
@@ -152,6 +158,7 @@ You can create or edit `.vscode/sftp_plus.json` manually to configure connection
       "remotePath": "/",
       "driveLetter": "Z",
       "autoConnect": false,
+      "autoReconnectOnDrop": false,
       "explicitTls": true,
       "ignoreCertErrors": false
     }
@@ -225,8 +232,8 @@ winget install WinFsp.WinFsp
 
 1. Check server address and port
 2. Verify username and password
-3. For self-signed certificates, enable `ignoreCertErrors`
-4. Check the Output panel (View → Output → SFTP+) for logs
+3. For FTPS certificate failures, open the host **Console** tab and enable `ignoreCertErrors` if you want to auto-accept the certificate
+4. Check the host **Console** tab and the Output panel (View → Output → SFTP+) for logs
 
 ### Drive not appearing
 

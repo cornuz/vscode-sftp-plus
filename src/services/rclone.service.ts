@@ -1,7 +1,7 @@
 import { exec, spawn, ChildProcess } from 'child_process';
 import { promisify } from 'util';
 import * as vscode from 'vscode';
-import { ConnectionConfig, InstallStatus } from '../models';
+import { ConnectionConfig, ConnectionDiagnostic, ConnectionTestResult, InstallStatus } from '../models';
 import { Logger } from '../utils/logger';
 
 const execAsync = promisify(exec);
@@ -11,6 +11,11 @@ const execAsync = promisify(exec);
  */
 export class RcloneService {
   private rclonePath: string;
+
+  private static readonly CERTIFICATE_PATTERN = /(certificate|tls|ssl|x509|handshake|unknown authority|self[- ]signed)/i;
+  private static readonly AUTH_PATTERN = /(530|authentication failed|login failed|access denied|permission denied|wrong password|invalid credentials)/i;
+  private static readonly TIMEOUT_PATTERN = /(timed out|timeout|etimedout)/i;
+  private static readonly NETWORK_PATTERN = /(econnrefused|connection refused|no such host|network is unreachable|host is down|connection reset)/i;
 
   constructor() {
     this.rclonePath = this.getConfiguredPath();
@@ -160,7 +165,7 @@ export class RcloneService {
       args.push('--ftp-disable-tls13');     // Workaround for buggy FTP servers with TLS
       args.push('--ftp-close-timeout', '30s'); // Wait longer before closing data connection
       args.push('--ftp-shut-timeout', '30s');  // Wait longer for data connection close status
-      if (config.protocol === 'ftps' || config.ignoreCertErrors) {
+      if (config.ignoreCertErrors) {
         args.push('--ftp-no-check-certificate');
       }
     }
@@ -170,13 +175,62 @@ export class RcloneService {
 
     const process = spawn(this.rclonePath, args, {
       detached: true,
-      stdio: 'ignore',
+      stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
     });
 
     process.unref();
 
     return { process, rcPort };
+  }
+
+  /**
+   * Classify a connection error so the UI can react consistently.
+   */
+  classifyConnectionError(error: unknown, certificateAlreadyAccepted = false): ConnectionDiagnostic {
+    const rawMessage = error instanceof Error ? error.message : String(error);
+    const normalized = rawMessage.trim();
+
+    if (RcloneService.CERTIFICATE_PATTERN.test(normalized)) {
+      return {
+        kind: 'certificate',
+        message: certificateAlreadyAccepted
+          ? 'Certificate validation failed even though auto-accept is enabled'
+          : 'Certificate error detected. Accept the certificate or enable auto-accept.',
+        rawMessage: normalized,
+        canAcceptCertificate: !certificateAlreadyAccepted,
+      };
+    }
+
+    if (RcloneService.AUTH_PATTERN.test(normalized)) {
+      return {
+        kind: 'authentication',
+        message: 'Authentication failed - check username/password',
+        rawMessage: normalized,
+      };
+    }
+
+    if (RcloneService.TIMEOUT_PATTERN.test(normalized)) {
+      return {
+        kind: 'timeout',
+        message: 'Connection timed out - check host/port',
+        rawMessage: normalized,
+      };
+    }
+
+    if (RcloneService.NETWORK_PATTERN.test(normalized)) {
+      return {
+        kind: 'network',
+        message: 'Network error - check host, port, and reachability',
+        rawMessage: normalized,
+      };
+    }
+
+    return {
+      kind: 'unknown',
+      message: normalized,
+      rawMessage: normalized,
+    };
   }
 
   /**
@@ -776,10 +830,15 @@ export class RcloneService {
   /**
    * Test a connection without mounting
    */
-  async testConnection(config: ConnectionConfig, password: string): Promise<{ success: boolean; message: string }> {
+  async testConnection(
+    config: ConnectionConfig,
+    password: string,
+    onOutput?: (line: string, level: 'info' | 'warn' | 'error') => void
+  ): Promise<ConnectionTestResult> {
     try {
       const obscuredPassword = await this.obscurePassword(password);
       const remoteSpec = this.buildConnectionString(config, obscuredPassword);
+      onOutput?.(`rclone lsd ${remoteSpec}`, 'info');
 
       // Use rclone lsd to list directories (quick test)
       const { stdout, stderr } = await execAsync(
@@ -787,24 +846,41 @@ export class RcloneService {
         { timeout: 15000 }
       );
 
+      if (stdout.trim()) {
+        for (const line of stdout.trim().split(/\r?\n/)) {
+          onOutput?.(line, 'info');
+        }
+      }
+
+      if (stderr.trim()) {
+        for (const line of stderr.trim().split(/\r?\n/)) {
+          onOutput?.(line, 'warn');
+        }
+      }
+
       Logger.info(`Test connection to ${config.host} successful`);
-      return { success: true, message: 'Connection successful' };
+      return {
+        success: true,
+        message: 'Connection successful',
+        diagnostic: {
+          kind: 'unknown',
+          message: 'Connection successful',
+        },
+      };
     } catch (error: unknown) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
       Logger.error(`Test connection to ${config.host} failed`, error);
-
-      // Parse common error messages
-      if (errorMessage.includes('530')) {
-        return { success: false, message: 'Authentication failed - check username/password' };
-      }
-      if (errorMessage.includes('timeout') || errorMessage.includes('ETIMEDOUT')) {
-        return { success: false, message: 'Connection timed out - check host/port' };
-      }
-      if (errorMessage.includes('certificate')) {
-        return { success: false, message: 'Certificate error - try enabling "Ignore Certificate Errors"' };
+      const diagnostic = this.classifyConnectionError(error, config.ignoreCertErrors);
+      if (diagnostic.rawMessage) {
+        for (const line of diagnostic.rawMessage.split(/\r?\n/)) {
+          onOutput?.(line, diagnostic.kind === 'certificate' ? 'error' : 'warn');
+        }
       }
 
-      return { success: false, message: errorMessage };
+      return {
+        success: false,
+        message: diagnostic.message,
+        diagnostic,
+      };
     }
   }
 }

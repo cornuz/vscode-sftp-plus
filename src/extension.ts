@@ -55,6 +55,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const mcpManager = new McpManager(connectionManager);
   mcpManager.setWorkspaceState(context.workspaceState);
   mcpManager.setTrackingService(trackingService);
+  mcpManager.initializeToolHandlers();
   globalMcpManager = mcpManager;
 
   // Restore MCP state from previous session
@@ -104,6 +105,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
 
     // Update host details if current connection status changed
+    hostDetailsProvider.refreshCurrentConnection();
+  });
+
+  connectionManager.onDidChangeSessionLogs(() => {
     hostDetailsProvider.refreshCurrentConnection();
   });
 

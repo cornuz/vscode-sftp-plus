@@ -42,6 +42,9 @@ export interface ConnectionConfig {
   /** Auto-connect when VS Code starts (default: false) */
   autoConnect: boolean;
 
+  /** Auto-reconnect when an established connection drops unexpectedly (default: false) */
+  autoReconnectOnDrop: boolean;
+
   /** VFS cache mode for performance (default: full) */
   cacheMode: 'off' | 'minimal' | 'writes' | 'full';
 
@@ -53,6 +56,40 @@ export interface ConnectionConfig {
 
   /** Password stored in workspace JSON file (for compatibility, not recommended) */
   password?: string;
+}
+
+/**
+ * Classified connection failure categories
+ */
+export type ConnectionDiagnosticKind = 'certificate' | 'authentication' | 'timeout' | 'network' | 'unknown';
+
+/**
+ * Structured connection diagnostic returned by test/connect flows
+ */
+export interface ConnectionDiagnostic {
+  kind: ConnectionDiagnosticKind;
+  message: string;
+  rawMessage?: string;
+  canAcceptCertificate?: boolean;
+}
+
+/**
+ * Single session log line for connection/test flows
+ */
+export interface ConnectionSessionEntry {
+  timestamp: string;
+  source: 'connect' | 'test';
+  level: 'info' | 'warn' | 'error';
+  message: string;
+}
+
+/**
+ * Structured test connection result
+ */
+export interface ConnectionTestResult {
+  success: boolean;
+  message: string;
+  diagnostic: ConnectionDiagnostic;
 }
 
 /**
@@ -148,6 +185,7 @@ export const DEFAULT_CONNECTION_CONFIG: Partial<ConnectionConfig> = {
   explicitTls: true,
   ignoreCertErrors: false,
   autoConnect: false,
+  autoReconnectOnDrop: false,
   cacheMode: 'full',
   idleTimeout: '5m',
   syncRate: 60,

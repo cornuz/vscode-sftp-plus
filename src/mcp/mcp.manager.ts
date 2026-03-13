@@ -33,7 +33,8 @@ interface PersistedMcpState {
 /**
  * Manages MCP/Copilot access for SFTP+ connections.
  * Registers Language Model Tools that provide file access to Copilot.
- * Tools are registered on-demand when the first MCP is activated (lazy registration).
+ * Tools are registered at extension activation so agents can always discover
+ * connection, reconnect, and sync-status capabilities.
  */
 export class McpManager implements vscode.Disposable {
   private _disposables: vscode.Disposable[] = [];
@@ -51,7 +52,16 @@ export class McpManager implements vscode.Disposable {
   private _trackingService: TrackingService | undefined;
 
   constructor(private readonly connectionManager: ConnectionManager) {
-    // Tools are registered lazily on first MCP activation
+    // Tool handlers are registered explicitly during extension activation.
+  }
+
+  /**
+   * Ensure Language Model Tools are registered for the current VS Code session.
+   * This is called eagerly during activation so agents can always discover them,
+   * even before a specific host has MCP actively resumed.
+   */
+  initializeToolHandlers(): void {
+    this._registerToolHandlers();
   }
 
   /**
@@ -238,6 +248,46 @@ export class McpManager implements vscode.Disposable {
   }
 
   /**
+   * Standardized reconnect instruction for temporary MCP connectivity failures.
+   */
+  private _temporaryReconnectResult(connectionName: string, detail: string): vscode.LanguageModelToolResult {
+    return new vscode.LanguageModelToolResult([
+      new vscode.LanguageModelTextPart(
+        `TEMPORARY: ${detail} ` +
+        `ACTION REQUIRED: Call sftp-plus_reconnect with connectionName="${connectionName}" NOW to restore the connection autonomously, then retry this tool call.`
+      ),
+    ]);
+  }
+
+  /**
+   * Normalize low-level file-operation failures that usually mean the mounted drive dropped mid-tool.
+   */
+  private _normalizeOperationalError(
+    connectionName: string,
+    actionDescription: string,
+    error: unknown,
+    extraDetail?: string
+  ): vscode.LanguageModelToolResult {
+    const message = error instanceof Error ? error.message : String(error);
+    const normalized = message.toLowerCase();
+    const looksTemporaryConnectionRelated =
+      /enoent|eio|ebusy|enxio|not accessible|device is not ready|network name is no longer available|path not found|system cannot find the path|drive.*not accessible|connection.*lost/.test(normalized);
+
+    if (looksTemporaryConnectionRelated) {
+      return this._temporaryReconnectResult(
+        connectionName,
+        `${actionDescription} failed because the mounted host became unavailable during the operation.${extraDetail ? ` ${extraDetail}` : ''}`
+      );
+    }
+
+    return new vscode.LanguageModelToolResult([
+      new vscode.LanguageModelTextPart(
+        `Error: ${actionDescription} failed on "${connectionName}": ${message}${extraDetail ? `\n${extraDetail}` : ''}`
+      ),
+    ]);
+  }
+
+  /**
    * Register handlers for the Language Model Tools declared in package.json.
    * Called lazily on first MCP activation to avoid registering tools in projects
    * that don't need them.
@@ -400,7 +450,7 @@ export class McpManager implements vscode.Disposable {
       return;
     }
 
-    // Register tools on first MCP activation (lazy registration)
+    // Tools are already registered eagerly during activation; keep idempotent call.
     this._registerToolHandlers();
 
     // Initialize AI writable paths map (unless restored from suspend)
@@ -476,7 +526,7 @@ export class McpManager implements vscode.Disposable {
       return;
     }
 
-    // Register tools if not yet done (lazy registration)
+    // Tools are already registered eagerly during activation; keep idempotent call.
     this._registerToolHandlers();
 
     // Restore MCP active state
@@ -815,8 +865,8 @@ export class McpManager implements vscode.Disposable {
   /**
    * Reconnect a dropped or disconnected connection.
    * Usable by AI agents when a previous tool call returned a TEMPORARY connection error.
-   * Relies on credentials already stored in SecretStorage or workspace JSON.
-   * If no password is stored, VS Code will prompt the user.
+    * Uses only non-interactive credentials already available in SecretStorage,
+    * workspace config, or the in-memory session cache.
    */
   private async _reconnect(connectionName: string): Promise<vscode.LanguageModelToolResult> {
     const connection = this.connectionManager.getConnection(connectionName);
@@ -840,15 +890,28 @@ export class McpManager implements vscode.Disposable {
     Logger.info(`MCP reconnect: initiating reconnect for "${connectionName}"`);
 
     try {
-      await this.connectionManager.reconnect(connectionName);
+      await this.connectionManager.reconnect(connectionName, {
+        silent: true,
+        reason: 'MCP tool recovery',
+        requireCachedCredentials: true,
+      });
     } catch (error) {
-      // connect() shows its own error message to the user; surface it to the AI agent too
       const message = error instanceof Error ? error.message : String(error);
       Logger.error(`MCP reconnect: failed for "${connectionName}"`, error);
+
+      if (message.includes('Autonomous reconnect unavailable: no stored credentials are available for non-interactive reconnect')) {
+        return new vscode.LanguageModelToolResult([
+          new vscode.LanguageModelTextPart(
+            `MANUAL ACTION REQUIRED: Autonomous reconnect is not possible for "${connectionName}" because no stored non-interactive credentials are available. ` +
+            `Ask the user to reconnect once from the SFTP+ panel and store credentials, then retry the previous MCP tool.`
+          ),
+        ]);
+      }
+
       return new vscode.LanguageModelToolResult([
         new vscode.LanguageModelTextPart(
-          `Error: Failed to reconnect "${connectionName}": ${message}. ` +
-          `Please ask the user to check their credentials or network and try again.`
+          `TEMPORARY: Failed to reconnect "${connectionName}": ${message}. ` +
+          `Retry sftp-plus_reconnect once if the host is coming back, otherwise ask the user to check the host/network state.`
         ),
       ]);
     }
@@ -889,21 +952,47 @@ export class McpManager implements vscode.Disposable {
   /**
    * List all connections and their MCP status
    */
-  private _listConnections(): vscode.LanguageModelToolResult {
+  private async _listConnections(): Promise<vscode.LanguageModelToolResult> {
     const connections = this.connectionManager.getConnections();
 
-    const result = connections.map(c => ({
-      name: c.config.name,
-      host: c.config.host,
-      protocol: c.config.protocol,
-      status: c.status,
-      mcpEnabled: c.mcpActive === true,
-      mcpSuspended: c.mcpSuspended === true,
-      mountedDrive: c.mountedDrive || null,
+    const result = await Promise.all(connections.map(async c => {
+      const hasStoredPassword = !!(await this.connectionManager.getPassword(c.config.name));
+      const autonomousReconnectAvailable = !!c.obscuredPassword || hasStoredPassword;
+      const mcpState = c.mcpActive ? 'active' : (c.mcpSuspended ? 'suspended' : 'disabled');
+
+      let recoveryAction: 'none' | 'call-sftp-plus_reconnect' | 'manual-reconnect-required' = 'none';
+      let recoveryHint = 'No recovery action needed.';
+
+      if (c.status !== ConnectionStatus.Connected && c.mcpSuspended) {
+        if (autonomousReconnectAvailable) {
+          recoveryAction = 'call-sftp-plus_reconnect';
+          recoveryHint = 'Call sftp-plus_reconnect now, then retry the previous MCP tool.';
+        } else {
+          recoveryAction = 'manual-reconnect-required';
+          recoveryHint = 'Ask the user to reconnect once from the SFTP+ panel and store credentials.';
+        }
+      }
+
+      return {
+        name: c.config.name,
+        host: c.config.host,
+        protocol: c.config.protocol,
+        status: c.status,
+        mcpEnabled: c.mcpActive === true,
+        mcpSuspended: c.mcpSuspended === true,
+        mcpState,
+        mountedDrive: c.mountedDrive || null,
+        autonomousReconnectAvailable,
+        recoveryAction,
+        recoveryHint,
+      };
     }));
 
     const mcpEnabledCount = result.filter(c => c.mcpEnabled).length;
     const mcpSuspendedCount = result.filter(c => c.mcpSuspended).length;
+
+    const reconnectNowCount = result.filter(c => c.recoveryAction === 'call-sftp-plus_reconnect').length;
+    const manualRecoveryCount = result.filter(c => c.recoveryAction === 'manual-reconnect-required').length;
 
     let summary = `Found ${connections.length} connection(s)`;
     if (mcpEnabledCount > 0) {
@@ -911,6 +1000,12 @@ export class McpManager implements vscode.Disposable {
     }
     if (mcpSuspendedCount > 0) {
       summary += `, ${mcpSuspendedCount} with Copilot access suspended (will auto-resume on reconnect)`;
+    }
+    if (reconnectNowCount > 0) {
+      summary += `. ${reconnectNowCount} connection(s) can be recovered autonomously right now with sftp-plus_reconnect`;
+    }
+    if (manualRecoveryCount > 0) {
+      summary += `. ${manualRecoveryCount} connection(s) require manual reconnect because no stored credentials are available`;
     }
     if (mcpEnabledCount === 0 && mcpSuspendedCount === 0) {
       summary += `. Note: No connections have Copilot access enabled. Ask the user to enable it via the SFTP+ panel.`;
@@ -980,12 +1075,12 @@ export class McpManager implements vscode.Disposable {
       ]);
     } catch (error) {
       Logger.error(`MCP list_files error: ${error}`);
-      return new vscode.LanguageModelToolResult([
-        new vscode.LanguageModelTextPart(
-          `Error listing files at "${remotePath || '/'}" on ${connectionName}: ${error}\n` +
-          `Target path was: ${targetPath}`
-        ),
-      ]);
+      return this._normalizeOperationalError(
+        connectionName,
+        `Listing files at "${remotePath || '/'}"`,
+        error,
+        `Target path was: ${targetPath}`
+      );
     }
   }
 
@@ -1093,12 +1188,12 @@ export class McpManager implements vscode.Disposable {
       ]);
     } catch (error) {
       Logger.error(`MCP read_file error: ${error}`);
-      return new vscode.LanguageModelToolResult([
-        new vscode.LanguageModelTextPart(
-          `Error reading file "${remotePath}" on ${connectionName}: ${error}\n` +
-          `Full path was: ${fullPath}`
-        ),
-      ]);
+      return this._normalizeOperationalError(
+        connectionName,
+        `Reading file "${remotePath}"`,
+        error,
+        `Full path was: ${fullPath}`
+      );
     }
   }
 
@@ -1162,12 +1257,12 @@ export class McpManager implements vscode.Disposable {
       ]);
     } catch (error) {
       Logger.error(`MCP write_file error: ${error}`);
-      return new vscode.LanguageModelToolResult([
-        new vscode.LanguageModelTextPart(
-          `Error writing file "${remotePath}" on ${connectionName}: ${error}\n` +
-          `Full path was: ${fullPath}`
-        ),
-      ]);
+      return this._normalizeOperationalError(
+        connectionName,
+        `Writing file "${remotePath}"`,
+        error,
+        `Full path was: ${fullPath}`
+      );
     }
   }
 
@@ -1254,11 +1349,11 @@ export class McpManager implements vscode.Disposable {
       ]);
     } catch (error) {
       Logger.error(`MCP prepare_edit error: ${error}`);
-      return new vscode.LanguageModelToolResult([
-        new vscode.LanguageModelTextPart(
-          `Error preparing file "${remotePath}" for edit: ${error}`
-        ),
-      ]);
+      return this._normalizeOperationalError(
+        connectionName,
+        `Preparing file "${remotePath}" for edit`,
+        error
+      );
     }
   }
 
@@ -1413,9 +1508,7 @@ export class McpManager implements vscode.Disposable {
       ]);
     } catch (error) {
       Logger.error(`MCP search_files error: ${error}`);
-      return new vscode.LanguageModelToolResult([
-        new vscode.LanguageModelTextPart(`Error searching files: ${error}`),
-      ]);
+      return this._normalizeOperationalError(connectionName, 'Searching files', error);
     }
   }
 
@@ -1541,9 +1634,7 @@ export class McpManager implements vscode.Disposable {
       ]);
     } catch (error) {
       Logger.error(`MCP get_tree error: ${error}`);
-      return new vscode.LanguageModelToolResult([
-        new vscode.LanguageModelTextPart(`Error getting tree: ${error}`),
-      ]);
+      return this._normalizeOperationalError(connectionName, 'Getting directory tree', error);
     }
   }
 
@@ -1657,9 +1748,7 @@ export class McpManager implements vscode.Disposable {
       ]);
     } catch (error) {
       Logger.error(`MCP get_sync_status error: ${error}`);
-      return new vscode.LanguageModelToolResult([
-        new vscode.LanguageModelTextPart(`Error getting sync status: ${error}`),
-      ]);
+      return this._normalizeOperationalError(connectionName, 'Getting sync status', error);
     }
   }
 
@@ -1706,9 +1795,7 @@ export class McpManager implements vscode.Disposable {
       }
     } catch (error) {
       Logger.error(`MCP restore_original error: ${error}`);
-      return new vscode.LanguageModelToolResult([
-        new vscode.LanguageModelTextPart(`Error restoring original: ${error}`),
-      ]);
+      return this._normalizeOperationalError(connectionName, `Restoring original for "${remotePath}"`, error);
     }
   }
 

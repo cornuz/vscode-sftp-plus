@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
-import { Connection, ConnectionConfig, ConnectionStatus, ConnectionScope, PasswordSource, DEFAULT_CONNECTION_CONFIG, InstallStatus, SyncStatus } from '../models';
+import { Connection, ConnectionConfig, ConnectionStatus, DEFAULT_CONNECTION_CONFIG, InstallStatus, SyncStatus } from '../models';
 import { ConnectionManager } from '../services/connection.manager';
 import { TrackingService, TrackedFileWithContext } from '../services/tracking.service';
 import { McpManager } from '../mcp';
@@ -32,7 +32,7 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
 
   private _view?: vscode.WebviewView;
   private _currentConnection?: Connection;
-  private _currentTab: 'settings' | 'files' = 'settings';
+  private _currentTab: 'settings' | 'console' | 'files' = 'settings';
   private _currentPath?: string;
   private _isNewConnection = false;
   private _expandedFolders: Set<string> = new Set(); // Track expanded folders
@@ -96,6 +96,9 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
         // Connected: show Files tab
         this._currentTab = 'files';
         this._currentPath = `${connection.mountedDrive}:\\`;
+      } else if (connection.status === ConnectionStatus.Connecting) {
+        this._currentTab = 'console';
+        this._currentPath = undefined;
       } else {
         // Disconnected: show Settings tab
         this._currentTab = 'settings';
@@ -192,6 +195,7 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
     if (freshConnection) {
       const wasConnected = this._currentConnection.status === ConnectionStatus.Connected;
       const isNowConnected = freshConnection.status === ConnectionStatus.Connected;
+      const isConnecting = freshConnection.status === ConnectionStatus.Connecting;
 
       this._currentConnection = freshConnection;
 
@@ -200,9 +204,14 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
         // Just disconnected: switch to Settings, clear path
         this._currentTab = 'settings';
         this._currentPath = undefined;
+      } else if (isConnecting) {
+        this._currentTab = 'console';
+        this._currentPath = undefined;
       } else if (!wasConnected && isNowConnected && freshConnection.mountedDrive) {
         // Just connected: switch to Files and set path
-        this._currentTab = 'files';
+        if (this._currentTab !== 'console') {
+          this._currentTab = 'files';
+        }
         this._currentPath = `${freshConnection.mountedDrive}:\\`;
       } else if (isNowConnected && freshConnection.mountedDrive && this._currentTab === 'settings') {
         // Already connected but still on settings tab: switch to Files
@@ -332,6 +341,16 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
             }
           } else {
             await this._downloadFile(message.path);
+          }
+          break;
+
+        case 'uploadFile':
+          if (message.paths && Array.isArray(message.paths)) {
+            for (const filePath of message.paths) {
+              await this._uploadFile(filePath);
+            }
+          } else {
+            await this._uploadFile(message.path);
           }
           break;
 
@@ -503,6 +522,7 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
         remotePath: formData.remotePath,
         driveLetter: formData.driveLetter,
         autoConnect: formData.autoConnect,
+        autoReconnectOnDrop: formData.autoReconnectOnDrop,
         explicitTls: formData.explicitTls,
         ignoreCertErrors: formData.ignoreCertErrors,
         cacheMode: formData.cacheMode,
@@ -539,6 +559,10 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
 
   private async _testConnection(formData: ConnectionConfigWithPassword): Promise<void> {
     try {
+      if (this._currentConnection) {
+        this._currentTab = 'console';
+        await this._updateView();
+      }
       this._view?.webview.postMessage({ command: 'testStarted' });
 
       // Create a config object for testing (use defaults for required fields)
@@ -559,13 +583,17 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
       this._view?.webview.postMessage({
         command: 'testResult',
         success: result.success,
-        message: result.message
+        message: result.message,
+        diagnosticKind: result.diagnostic.kind,
+        canAcceptCertificate: result.diagnostic.canAcceptCertificate === true,
       });
     } catch (error) {
       this._view?.webview.postMessage({
         command: 'testResult',
         success: false,
-        message: String(error)
+        message: String(error),
+        diagnosticKind: 'unknown',
+        canAcceptCertificate: false,
       });
     }
   }
@@ -836,6 +864,72 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
     .status.error {
       background: var(--vscode-inputValidation-errorBackground);
       border: 1px solid var(--vscode-inputValidation-errorBorder);
+    }
+    .status-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    /* Console */
+    .console-container {
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      gap: 8px;
+    }
+    .console-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--vscode-panel-border);
+      flex-shrink: 0;
+    }
+    .console-title {
+      font-size: 12px;
+      text-transform: uppercase;
+      color: var(--vscode-descriptionForeground);
+      letter-spacing: 0.4px;
+    }
+    .console-body {
+      flex: 1;
+      overflow: auto;
+      background: var(--vscode-textCodeBlock-background, var(--vscode-editor-background));
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 4px;
+      padding: 8px;
+      font-family: var(--vscode-editor-font-family);
+      font-size: 12px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .console-line {
+      display: grid;
+      grid-template-columns: 72px 48px 1fr;
+      gap: 8px;
+      padding: 2px 0;
+    }
+    .console-line.message .console-message {
+      color: var(--vscode-foreground);
+    }
+    .console-line.notice .console-message {
+      color: var(--vscode-textLink-foreground, #3794ff);
+    }
+    .console-line.error .console-message {
+      color: var(--vscode-errorForeground);
+    }
+    .console-line.confirmation .console-message {
+      color: var(--vscode-testing-iconPassed, #89d185);
+    }
+    .console-meta {
+      color: var(--vscode-descriptionForeground);
+    }
+    .console-empty {
+      color: var(--vscode-descriptionForeground);
+      padding: 8px 0;
     }
 
     /* File Browser */
@@ -1174,8 +1268,10 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
 
   private _getTabsHtml(): string {
     const settingsActive = this._currentTab === 'settings' ? 'active' : '';
+    const consoleActive = this._currentTab === 'console' ? 'active' : '';
     const filesActive = this._currentTab === 'files' ? 'active' : '';
     const isConnected = this._currentConnection?.status === ConnectionStatus.Connected;
+    const hasConnection = !!this._currentConnection;
 
     // Get scope label for settings tab
     let scopeLabel = '';
@@ -1191,7 +1287,15 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
       return `
         <div class="tabs">
           <button class="tab ${filesActive}" data-tab="files"><span class="codicon codicon-folder"></span> Files</button>
+          <button class="tab ${consoleActive}" data-tab="console"><span class="codicon codicon-output"></span> Console</button>
           <button class="tab ${settingsActive}" data-tab="settings"><span class="codicon codicon-gear"></span> Settings${scopeLabel}</button>
+        </div>
+      `;
+    } else if (hasConnection) {
+      return `
+        <div class="tabs">
+          <button class="tab ${settingsActive}" data-tab="settings"><span class="codicon codicon-gear"></span> Settings${scopeLabel}</button>
+          <button class="tab ${consoleActive}" data-tab="console"><span class="codicon codicon-output"></span> Console</button>
         </div>
       `;
     } else {
@@ -1222,9 +1326,77 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
 
     if (this._currentTab === 'settings') {
       return this._getSettingsHtml();
-    } else {
-      return this._getFileBrowserHtml();
     }
+
+    if (this._currentTab === 'console') {
+      return this._getConsoleHtml();
+    }
+
+    return this._getFileBrowserHtml();
+  }
+
+  private _getConsoleHtml(): string {
+    if (!this._currentConnection) {
+      return `
+        <div class="empty-state">
+          <div class="icon"><span class="codicon codicon-output" style="font-size: 48px;"></span></div>
+          <p>No active session</p>
+          <p style="margin-top: 8px; font-size: 12px;">Run a test or connect to capture logs</p>
+        </div>
+      `;
+    }
+
+    const entries = this._connectionManager.getSessionLog(this._currentConnection.config.name);
+    const lines = entries.length > 0
+      ? entries.map(entry => {
+        const time = this._escapeHtml(entry.timestamp.slice(11, 19));
+        const source = this._escapeHtml(entry.source);
+        const message = this._escapeHtml(entry.message);
+        const tone = this._getConsoleTone(entry.level, entry.message);
+        return `<div class="console-line ${tone}"><span class="console-meta">${time}</span><span class="console-meta">${source}</span><span class="console-message">${message}</span></div>`;
+      }).join('')
+      : '<div class="console-empty">No logs yet for this session.</div>';
+
+    return `
+      <div class="console-container">
+        <div class="console-header">
+          <div class="console-title">${this._escapeHtml(this._currentConnection.config.name)} session console</div>
+        </div>
+        <div class="console-body" id="consoleBody">${lines}</div>
+      </div>
+    `;
+  }
+
+  private _getConsoleTone(level: 'info' | 'warn' | 'error', message: string): 'message' | 'notice' | 'error' | 'confirmation' {
+    const normalized = message.toLowerCase();
+
+    if (
+      normalized.includes(' error') ||
+      normalized.startsWith('error') ||
+      normalized.includes('error:') ||
+      normalized.includes(' failed') ||
+      normalized.includes('exception')
+    ) {
+      return 'error';
+    }
+
+    if (
+      normalized.includes(' notice:') ||
+      normalized.startsWith('notice:') ||
+      normalized.includes('serving remote control')
+    ) {
+      return 'notice';
+    }
+
+    if (
+      normalized.includes('mounted on') ||
+      normalized.includes('connection successful') ||
+      normalized.includes('connected to')
+    ) {
+      return 'confirmation';
+    }
+
+    return 'message';
   }
 
   private _getPrerequisiteHtml(): string {
@@ -1360,13 +1532,18 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
         </div>
 
         <div class="checkbox-group">
+          <input type="checkbox" id="autoReconnectOnDrop" name="autoReconnectOnDrop" ${config.autoReconnectOnDrop ? 'checked' : ''}>
+          <label for="autoReconnectOnDrop">Auto-reconnect on unattended disconnection</label>
+        </div>
+
+        <div class="checkbox-group">
           <input type="checkbox" id="explicitTls" name="explicitTls" ${config.explicitTls !== false ? 'checked' : ''}>
           <label for="explicitTls">Use explicit TLS (FTPS)</label>
         </div>
 
         <div class="checkbox-group">
           <input type="checkbox" id="ignoreCertErrors" name="ignoreCertErrors" ${config.ignoreCertErrors ? 'checked' : ''}>
-          <label for="ignoreCertErrors">Ignore SSL certificate errors</label>
+          <label for="ignoreCertErrors">Auto-accept invalid certificate (FTPS)</label>
         </div>
 
         <div class="form-group" style="margin-top: 12px;">
@@ -1429,6 +1606,10 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
           <div class="context-menu-item" data-action="download">
             <span class="codicon codicon-cloud-download"></span>
             <span>Download</span>
+          </div>
+          <div class="context-menu-item" data-action="upload">
+            <span class="codicon codicon-cloud-upload"></span>
+            <span>Upload</span>
           </div>
           <div class="context-menu-separator"></div>
           <div class="context-menu-item" data-action="rename">
@@ -1726,6 +1907,40 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
     } catch (error) {
       Logger.error('Failed to download file:', error);
       vscode.window.showErrorMessage(`Failed to download file: ${error}`);
+    }
+  }
+
+  /**
+   * Upload a tracked local file back to the mounted host
+   */
+  private async _uploadFile(remotePath: string): Promise<void> {
+    try {
+      const trackedInfo = this._trackedFiles.get(remotePath);
+      if (!trackedInfo) {
+        vscode.window.showErrorMessage('Upload is only available for tracked local-newer files');
+        return;
+      }
+
+      const workspaceFolders = vscode.workspace.workspaceFolders;
+      if (!workspaceFolders || workspaceFolders.length === 0) {
+        vscode.window.showErrorMessage('No workspace folder open. Please open a folder first.');
+        return;
+      }
+
+      const workspaceRoot = workspaceFolders[0].uri.fsPath;
+      const localFullPath = path.join(workspaceRoot, trackedInfo.file.localPath);
+      const localDocument = vscode.workspace.textDocuments.find(doc => doc.uri.fsPath === localFullPath);
+      if (localDocument?.isDirty) {
+        await localDocument.save();
+      }
+
+      const success = await this._trackingService.uploadTrackedFile(trackedInfo.file);
+      if (success) {
+        await this.refreshTrackedFiles();
+      }
+    } catch (error) {
+      Logger.error('Failed to upload file:', error);
+      vscode.window.showErrorMessage(`Failed to upload file: ${error}`);
     }
   }
 
@@ -2037,6 +2252,34 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
   private _getScript(): string {
     return `
       const vscode = acquireVsCodeApi();
+      const escapeHtml = (value) => String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/\"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+
+      function updateStatus(message, type, canAcceptCertificate) {
+        const statusEl = document.getElementById('statusMessage');
+        if (!statusEl) {
+          return;
+        }
+
+        statusEl.className = 'status' + (type ? ' ' + type : '');
+        const actions = canAcceptCertificate
+          ? '<div class="status-actions"><button type="button" class="btn-secondary" id="acceptCertBtn">Accept certificate and retest</button></div>'
+          : '';
+        statusEl.innerHTML = '<div>' + escapeHtml(message) + '</div>' + actions;
+
+        document.getElementById('acceptCertBtn')?.addEventListener('click', () => {
+          const checkbox = document.getElementById('ignoreCertErrors');
+          const testBtn = document.getElementById('testBtn');
+          if (checkbox) {
+            checkbox.checked = true;
+          }
+          testBtn?.click();
+        });
+      }
 
       // Tab switching
       document.querySelectorAll('.tab').forEach(tab => {
@@ -2062,6 +2305,7 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
             remotePath: formData.get('remotePath') || '/',
             driveLetter: formData.get('driveLetter')?.toUpperCase() || undefined,
             autoConnect: formData.get('autoConnect') === 'on',
+            autoReconnectOnDrop: formData.get('autoReconnectOnDrop') === 'on',
             explicitTls: formData.get('explicitTls') === 'on',
             ignoreCertErrors: formData.get('ignoreCertErrors') === 'on',
             syncRate: parseInt(formData.get('syncRate')) || 60,
@@ -2081,6 +2325,7 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
             remotePath: formData.get('remotePath') || '/',
             explicitTls: formData.get('explicitTls') === 'on',
             ignoreCertErrors: formData.get('ignoreCertErrors') === 'on',
+            autoReconnectOnDrop: formData.get('autoReconnectOnDrop') === 'on',
           };
           vscode.postMessage({ command: 'testConnection', config });
         });
@@ -2235,16 +2480,20 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
           const selectedPaths = getSelectedFilePaths();
           const multiSelect = selectedPaths.length > 1;
           const allFiles = areAllSelectedFiles();
+          const selectedItems = Array.from(document.querySelectorAll('.file-item.selected'));
+          const allLocalNewer = selectedItems.length > 0 && selectedItems.every(el => el.classList.contains('local-newer'));
 
           // Show/hide menu items based on selection
           const cloudEditItem = document.querySelector('[data-action="cloudEdit"]');
           const downloadItem = document.querySelector('[data-action="download"]');
+          const uploadItem = document.querySelector('[data-action="upload"]');
           const renameItem = document.querySelector('[data-action="rename"]');
           const duplicateItem = document.querySelector('[data-action="duplicate"]');
 
           // Cloud Edit, Download: only for files (single or multi)
           if (cloudEditItem) cloudEditItem.style.display = allFiles ? 'flex' : 'none';
           if (downloadItem) downloadItem.style.display = allFiles ? 'flex' : 'none';
+          if (uploadItem) uploadItem.style.display = (allFiles && allLocalNewer) ? 'flex' : 'none';
 
           // Rename, Duplicate: only for single selection
           if (renameItem) renameItem.style.display = (!multiSelect) ? 'flex' : 'none';
@@ -2256,6 +2505,9 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
           }
           if (downloadItem) {
             downloadItem.querySelector('span:last-child').textContent = multiSelect ? 'Download (' + selectedPaths.length + ')' : 'Download';
+          }
+          if (uploadItem) {
+            uploadItem.querySelector('span:last-child').textContent = multiSelect ? 'Upload (' + selectedPaths.length + ')' : 'Upload';
           }
           const deleteItem = document.querySelector('[data-action="delete"]');
           if (deleteItem) {
@@ -2318,6 +2570,12 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
               } else {
                 vscode.postMessage({ command: 'downloadFile', path: filePath });
               }
+            } else if (action === 'upload') {
+              if (isMultiSelect) {
+                vscode.postMessage({ command: 'uploadFile', paths: selectedPaths });
+              } else {
+                vscode.postMessage({ command: 'uploadFile', path: filePath });
+              }
             } else if (action === 'rename') {
               vscode.postMessage({ command: 'renameFile', path: filePath });
             } else if (action === 'duplicate') {
@@ -2344,7 +2602,6 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
       // Handle messages from extension
       window.addEventListener('message', event => {
         const message = event.data;
-        const statusEl = document.getElementById('statusMessage');
 
         switch (message.command) {
           case 'focusSearch':
@@ -2363,31 +2620,24 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
             }
             break;
           case 'testStarted':
-            if (statusEl) {
-              statusEl.className = 'status';
-              statusEl.textContent = 'Testing connection...';
-            }
+            updateStatus('Testing connection...', '', false);
             break;
           case 'testResult':
-            if (statusEl) {
-              statusEl.className = 'status ' + (message.success ? 'success' : 'error');
-              statusEl.textContent = message.message;
-            }
+            updateStatus(message.message, message.success ? 'success' : 'error', message.canAcceptCertificate === true);
             break;
           case 'saveSuccess':
-            if (statusEl) {
-              statusEl.className = 'status success';
-              statusEl.textContent = 'Connection saved!';
-            }
+            updateStatus('Connection saved!', 'success', false);
             break;
           case 'saveError':
-            if (statusEl) {
-              statusEl.className = 'status error';
-              statusEl.textContent = 'Error: ' + message.error;
-            }
+            updateStatus('Error: ' + message.error, 'error', false);
             break;
         }
       });
+
+      const consoleBody = document.getElementById('consoleBody');
+      if (consoleBody) {
+        consoleBody.scrollTop = consoleBody.scrollHeight;
+      }
     `;
   }
 
