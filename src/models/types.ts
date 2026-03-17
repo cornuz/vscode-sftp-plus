@@ -143,6 +143,9 @@ export interface Connection {
   /** Consecutive health check failures before marking disconnected (runtime only) */
   healthCheckFailCount?: number;
 
+  /** Consecutive mount-access failures before marking disconnected (runtime only) */
+  mountAccessFailCount?: number;
+
   /** Obscured password for direct sync (runtime only, not persisted) */
   obscuredPassword?: string;
 }

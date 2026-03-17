@@ -22,6 +22,13 @@ interface ConnectionConfigWithPassword extends ConnectionConfig {
   password?: string;
 }
 
+interface FileBrowserErrorState {
+  path: string;
+  message: string;
+  hint: string;
+  code?: string;
+}
+
 /**
  * WebviewView provider that shows host details with tabs:
  * - Settings: Connection configuration form
@@ -48,6 +55,12 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
   private readonly _trackingService: TrackingService;
   private _autoRefreshTimer?: ReturnType<typeof setInterval>; // Timer for auto-refresh
   private _mcpManager?: McpManager; // MCP manager for AI write access
+  private _fileBrowserMarkup = '<li class="file-item empty"><span class="codicon codicon-loading codicon-modifier-spin"></span> Loading files...</li>';
+  private _fileBrowserLoading = false;
+  private _fileBrowserError?: FileBrowserErrorState;
+  private _autoRefreshSuspended = false;
+  private _fileBrowserRefreshPromise?: Promise<void>;
+  private _pendingFileBrowserRefresh = false;
 
   constructor(
     private readonly _extensionUri: vscode.Uri,
@@ -107,6 +120,11 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
     this._currentConnection = connection;
     this._isNewConnection = false;
     this._currentPrerequisite = undefined; // Clear prerequisite when showing connection
+
+    if (connection.status === ConnectionStatus.Connected && connection.mountedDrive) {
+      this._clearFileBrowserFailureState();
+      this._fileBrowserMarkup = '<li class="file-item empty"><span class="codicon codicon-loading codicon-modifier-spin"></span> Loading files...</li>';
+    }
 
     // Auto-switch tab based on connection status
     if (connectionChanged) {
@@ -182,6 +200,8 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
     if (connection.mountedDrive) {
       this._currentPath = `${connection.mountedDrive}:\\`;
     }
+    this._clearFileBrowserFailureState();
+    this._fileBrowserMarkup = '<li class="file-item empty"><span class="codicon codicon-loading codicon-modifier-spin"></span> Loading files...</li>';
     this._updateView();
     this._revealView();
   }
@@ -193,6 +213,8 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
     this._currentConnection = undefined;
     this._currentPath = undefined;
     this._cachedPassword = undefined;
+    this._clearFileBrowserFailureState();
+    this._fileBrowserMarkup = '<li class="file-item empty"><span class="codicon codicon-info"></span> No active connection</li>';
     // Stop auto-refresh timer
     if (this._autoRefreshTimer) {
       clearInterval(this._autoRefreshTimer);
@@ -227,12 +249,14 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
         this._currentPath = undefined;
       } else if (!wasConnected && isNowConnected && freshConnection.mountedDrive) {
         // Just connected: switch to Files and set path
+        this._clearFileBrowserFailureState();
         if (this._currentTab !== 'console') {
           this._currentTab = 'files';
         }
         this._currentPath = `${freshConnection.mountedDrive}:\\`;
       } else if (isNowConnected && freshConnection.mountedDrive && this._currentTab === 'settings') {
         // Already connected but still on settings tab: switch to Files
+        this._clearFileBrowserFailureState();
         this._currentTab = 'files';
         if (!this._currentPath) {
           this._currentPath = `${freshConnection.mountedDrive}:\\`;
@@ -418,7 +442,7 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
           break;
 
         case 'refresh':
-          await this._updateView();
+          await this._updateView(true);
           // Notify webview that refresh is complete
           this._view?.webview.postMessage({ command: 'refreshComplete' });
           break;
@@ -482,6 +506,7 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
           // Reconnect the current connection
           if (this._currentConnection) {
             try {
+              this._clearFileBrowserFailureState();
               // First disconnect
               await vscode.commands.executeCommand('sftp-plus.disconnect', this._currentConnection.config.name);
               // Wait a bit for cleanup
@@ -519,7 +544,8 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
       this._currentConnection &&
       this._currentTab === 'files' &&
       this._currentConnection.status === ConnectionStatus.Connected &&
-      this._currentConnection.config.syncRate > 0
+      this._currentConnection.config.syncRate > 0 &&
+      !this._autoRefreshSuspended
     ) {
       const intervalMs = this._currentConnection.config.syncRate * 1000;
       this._autoRefreshTimer = setInterval(async () => {
@@ -530,7 +556,7 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async _updateView(): Promise<void> {
+  private async _updateView(forceFileBrowserReload = false): Promise<void> {
     if (!this._view) return;
 
     // Update auto-refresh timer
@@ -548,8 +574,12 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
         // Use fullRemotePath as key to match with displayed files
         this._trackedFiles.set(file.fullRemotePath, { file, status });
       }
+
+      await this._refreshFileBrowserMarkup(forceFileBrowserReload);
     } else {
       this._trackedFiles.clear();
+      this._fileBrowserError = undefined;
+      this._fileBrowserLoading = false;
     }
 
     this._view.webview.html = this._getHtml();
@@ -1622,7 +1652,14 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
       `;
     }
 
-    const files = this._getFilesInPath();
+    let files = this._fileBrowserMarkup;
+    if (this._fileBrowserError) {
+      files = this._renderFileBrowserError(this._fileBrowserError);
+    } else if (this._fileBrowserLoading && !files) {
+      files = '<li class="file-item empty"><span class="codicon codicon-loading codicon-modifier-spin"></span> Loading files...</li>';
+    } else if (!files) {
+      files = '<li class="file-item empty"><span class="codicon codicon-info"></span> Empty folder</li>';
+    }
 
     const sizeActiveClass = this._showFileSize ? 'active' : '';
     const dateActiveClass = this._showFileDate ? 'active' : '';
@@ -1687,161 +1724,257 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
     `;
   }
 
-  private _getFilesInPath(): string {
-    if (!this._currentPath) return '';
-    return this._renderDirectory(this._currentPath, 0);
-  }
-
   /**
    * Recursively render directory contents with expand/collapse support
    */
-  private _renderDirectory(dirPath: string, depth: number, parentWasExpandedBeforeFilter: boolean = false): string {
-    try {
-      const entries = fs.readdirSync(dirPath, { withFileTypes: true });
-      const filterLower = this._searchFilter.toLowerCase();
+  private async _renderDirectory(dirPath: string, depth: number, parentWasExpandedBeforeFilter: boolean = false): Promise<string> {
+    const entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
+    const filterLower = this._searchFilter.toLowerCase();
 
-      // Filter entries based on search
-      const filtered = entries
-        .filter(e => !e.name.startsWith('.'))
-        .filter(e => {
-          if (!this._searchFilter) return true;
+    const filtered = entries
+      .filter(e => !e.name.startsWith('.'))
+      .filter(e => {
+        if (!this._searchFilter) return true;
 
-          // Check if this entry was expanded before filter started
-          const fullPath = path.join(dirPath, e.name);
-          const wasExpandedBeforeFilter = this._foldersExpandedBeforeFilter.has(fullPath);
-
-          // Folders that were expanded before filter: always show (don't filter them)
-          // because their content might contain matches
-          if (e.isDirectory() && wasExpandedBeforeFilter) return true;
-
-          // At root level OR inside a folder that was expanded before filter:
-          // apply the filter
-          if (depth === 0 || parentWasExpandedBeforeFilter) {
-            return e.name.toLowerCase().includes(filterLower);
-          }
-
-          // Inside a folder opened AFTER filter: don't filter
-          return true;
-        });
-
-      const sorted = filtered
-        .sort((a, b) => {
-          if (a.isDirectory() && !b.isDirectory()) return -1;
-          if (!a.isDirectory() && b.isDirectory()) return 1;
-          return a.name.localeCompare(b.name);
-        });
-
-      if (sorted.length === 0 && depth === 0) {
-        const message = this._searchFilter ? 'No matching files' : 'Empty folder';
-        return `<li class="file-item empty"><span class="codicon codicon-info"></span> ${message}</li>`;
-      }
-
-      return sorted.map(entry => {
-        const fullPath = path.join(dirPath, entry.name);
-        const isDir = entry.isDirectory();
-        const isExpanded = this._expandedFolders.has(fullPath);
-        // Was this folder expanded before filter started?
+        const fullPath = path.join(dirPath, e.name);
         const wasExpandedBeforeFilter = this._foldersExpandedBeforeFilter.has(fullPath);
-        const indent = depth * 16; // 16px per level
 
-        // Get AI toggle icon (only shown when MCP is active)
-        const aiToggleIcon = this._getAiToggleIcon(fullPath);
+        if (e.isDirectory() && wasExpandedBeforeFilter) return true;
 
-        if (isDir) {
-          const chevronClass = isExpanded ? 'codicon-chevron-down' : 'codicon-chevron-right';
-
-          let html = `
-            <li class="file-item" data-action="toggle" data-path="${this._escapeHtml(fullPath)}" style="padding-left: ${indent}px;">
-              <span class="chevron codicon ${chevronClass}"></span>
-              <span class="name">${this._escapeHtml(entry.name)}</span>
-              ${aiToggleIcon}
-            </li>
-          `;
-
-          // If expanded, render children
-          // Pass whether this folder was expanded before filter started
-          if (isExpanded) {
-            html += this._renderDirectory(fullPath, depth + 1, wasExpandedBeforeFilter);
-          }
-
-          return html;
-        } else {
-          const iconClass = this._getFileIcon(entry.name);
-          const stats = fs.statSync(fullPath);
-          const sizeHtml = this._showFileSize ? `<span class="meta size">${this._formatSize(stats.size)}</span>` : '';
-          const dateHtml = this._showFileDate ? `<span class="meta date">${this._formatDate(stats.mtime)}</span>` : '';
-          const selectedClass = this._selectedFile === fullPath ? ' selected' : '';
-
-          // Check tracking status
-          const trackedInfo = this._trackedFiles.get(fullPath);
-          const isTracked = !!trackedInfo;
-          let syncStatusClass = '';
-          let trackingIconClass = 'codicon-eye';
-
-          if (trackedInfo) {
-            switch (trackedInfo.status) {
-              case SyncStatus.NotDownloaded:
-                syncStatusClass = ' not-downloaded';
-                trackingIconClass = 'codicon-cloud-download';
-                break;
-              case SyncStatus.RemoteNewer:
-                syncStatusClass = ' remote-newer';
-                trackingIconClass = 'codicon-arrow-down';
-                break;
-              case SyncStatus.LocalNewer:
-                syncStatusClass = ' local-newer';
-                trackingIconClass = 'codicon-arrow-up';
-                break;
-              case SyncStatus.Synced:
-                syncStatusClass = ' synced';
-                trackingIconClass = 'codicon-check';
-                break;
-              default:
-                trackingIconClass = 'codicon-warning';
-            }
-          }
-
-          const trackedClass = isTracked ? ` tracked${syncStatusClass}` : '';
-          // Always reserve space for tracking icon to keep alignment
-          const trackingIcon = isTracked
-            ? `<span class="tracking-indicator codicon ${trackingIconClass}"></span>`
-            : `<span class="tracking-indicator-placeholder"></span>`;
-
-          return `
-            <li class="file-item${selectedClass}${trackedClass}" data-action="select" data-path="${this._escapeHtml(fullPath)}" style="padding-left: ${indent}px;">
-              <span class="chevron-spacer"></span>
-              <span class="icon"><span class="codicon ${iconClass}"></span></span>
-              <span class="name">${this._escapeHtml(entry.name)}</span>
-              ${dateHtml}${sizeHtml}${trackingIcon}${aiToggleIcon}
-            </li>
-          `;
+        if (depth === 0 || parentWasExpandedBeforeFilter) {
+          return e.name.toLowerCase().includes(filterLower);
         }
-      }).join('');
-    } catch (error) {
-      Logger.error(`Error reading directory ${dirPath}: ${error}`);
-      const errorMessage = error instanceof Error ? error.message : String(error);
 
-      // Check if it's a common connection issue
-      let hint = '';
-      if (errorMessage.includes('ENOENT') || errorMessage.includes('not accessible')) {
-        hint = ' - Drive may be disconnected. Try reconnecting.';
-      } else if (errorMessage.includes('ETIMEDOUT') || errorMessage.includes('timeout')) {
-        hint = ' - Connection timed out. Try reconnecting.';
-      } else if (errorMessage.includes('EACCES') || errorMessage.includes('permission')) {
-        hint = ' - Permission denied.';
+        return true;
+      });
+
+    const sorted = filtered
+      .sort((a, b) => {
+        if (a.isDirectory() && !b.isDirectory()) return -1;
+        if (!a.isDirectory() && b.isDirectory()) return 1;
+        return a.name.localeCompare(b.name);
+      });
+
+    if (sorted.length === 0 && depth === 0) {
+      const message = this._searchFilter ? 'No matching files' : 'Empty folder';
+      return `<li class="file-item empty"><span class="codicon codicon-info"></span> ${message}</li>`;
+    }
+
+    const rendered = await Promise.all(sorted.map(async entry => {
+      const fullPath = path.join(dirPath, entry.name);
+      const isDir = entry.isDirectory();
+      const isExpanded = this._expandedFolders.has(fullPath);
+      const wasExpandedBeforeFilter = this._foldersExpandedBeforeFilter.has(fullPath);
+      const indent = depth * 16;
+      const aiToggleIcon = this._getAiToggleIcon(fullPath);
+
+      if (isDir) {
+        const chevronClass = isExpanded ? 'codicon-chevron-down' : 'codicon-chevron-right';
+
+        let html = `
+          <li class="file-item" data-action="toggle" data-path="${this._escapeHtml(fullPath)}" style="padding-left: ${indent}px;">
+            <span class="chevron codicon ${chevronClass}"></span>
+            <span class="name">${this._escapeHtml(entry.name)}</span>
+            ${aiToggleIcon}
+          </li>
+        `;
+
+        if (isExpanded) {
+          html += await this._renderDirectory(fullPath, depth + 1, wasExpandedBeforeFilter);
+        }
+
+        return html;
       }
+
+      const iconClass = this._getFileIcon(entry.name);
+      const metadata = await this._getFileMetadata(fullPath);
+      const sizeHtml = this._showFileSize && metadata ? `<span class="meta size">${this._formatSize(metadata.size)}</span>` : '';
+      const dateHtml = this._showFileDate && metadata ? `<span class="meta date">${this._formatDate(metadata.mtime)}</span>` : '';
+      const selectedClass = this._selectedFile === fullPath ? ' selected' : '';
+
+      const trackedInfo = this._trackedFiles.get(fullPath);
+      const isTracked = !!trackedInfo;
+      let syncStatusClass = '';
+      let trackingIconClass = 'codicon-eye';
+
+      if (trackedInfo) {
+        switch (trackedInfo.status) {
+          case SyncStatus.NotDownloaded:
+            syncStatusClass = ' not-downloaded';
+            trackingIconClass = 'codicon-cloud-download';
+            break;
+          case SyncStatus.RemoteNewer:
+            syncStatusClass = ' remote-newer';
+            trackingIconClass = 'codicon-arrow-down';
+            break;
+          case SyncStatus.LocalNewer:
+            syncStatusClass = ' local-newer';
+            trackingIconClass = 'codicon-arrow-up';
+            break;
+          case SyncStatus.Synced:
+            syncStatusClass = ' synced';
+            trackingIconClass = 'codicon-check';
+            break;
+          default:
+            trackingIconClass = 'codicon-warning';
+        }
+      }
+
+      const trackedClass = isTracked ? ` tracked${syncStatusClass}` : '';
+      const trackingIcon = isTracked
+        ? `<span class="tracking-indicator codicon ${trackingIconClass}"></span>`
+        : `<span class="tracking-indicator-placeholder"></span>`;
 
       return `
-        <li class="file-item" style="color: var(--vscode-errorForeground)">
-          <span class="codicon codicon-error"></span> Error reading directory${hint}
-        </li>
-        <li class="file-item">
-          <button class="action-button" data-action="reconnect" style="margin-left: 24px; margin-top: 8px;">
-            <span class="codicon codicon-refresh"></span> Reconnect
-          </button>
+        <li class="file-item${selectedClass}${trackedClass}" data-action="select" data-path="${this._escapeHtml(fullPath)}" style="padding-left: ${indent}px;">
+          <span class="chevron-spacer"></span>
+          <span class="icon"><span class="codicon ${iconClass}"></span></span>
+          <span class="name">${this._escapeHtml(entry.name)}</span>
+          ${dateHtml}${sizeHtml}${trackingIcon}${aiToggleIcon}
         </li>
       `;
+    }));
+
+    return rendered.join('');
+  }
+
+  private async _getFileMetadata(fullPath: string): Promise<{ size: number; mtime: Date } | undefined> {
+    if (!this._showFileSize && !this._showFileDate) {
+      return undefined;
     }
+
+    const stats = await fs.promises.stat(fullPath);
+    return { size: stats.size, mtime: stats.mtime };
+  }
+
+  private async _refreshFileBrowserMarkup(force = false): Promise<void> {
+    if (!this._currentConnection || this._currentConnection.status !== ConnectionStatus.Connected || !this._currentPath) {
+      this._fileBrowserMarkup = '';
+      this._fileBrowserError = undefined;
+      this._fileBrowserLoading = false;
+      return;
+    }
+
+    if (this._autoRefreshSuspended && this._fileBrowserError && !force) {
+      return;
+    }
+
+    if (this._fileBrowserRefreshPromise) {
+      this._pendingFileBrowserRefresh = true;
+      await this._fileBrowserRefreshPromise;
+      return;
+    }
+
+    this._fileBrowserRefreshPromise = this._buildFileBrowserMarkup(force);
+    await this._fileBrowserRefreshPromise;
+  }
+
+  private async _buildFileBrowserMarkup(force: boolean): Promise<void> {
+    const refreshKey = `${this._currentConnection?.config.name ?? ''}:${this._currentPath ?? ''}:${this._searchFilter}`;
+    if (force) {
+      this._clearFileBrowserFailureState();
+    }
+
+    this._fileBrowserLoading = true;
+
+    try {
+      const markup = this._currentPath ? await this._renderDirectory(this._currentPath, 0) : '';
+      const currentKey = `${this._currentConnection?.config.name ?? ''}:${this._currentPath ?? ''}:${this._searchFilter}`;
+
+      if (refreshKey === currentKey) {
+        this._fileBrowserMarkup = markup;
+        this._fileBrowserError = undefined;
+        if (this._currentConnection) {
+          this._connectionManager.resetMountAccessFailures(this._currentConnection.config.name);
+        }
+      }
+    } catch (error) {
+      const currentPath = this._currentPath ?? '';
+      Logger.error(`Error reading directory ${currentPath}: ${error}`);
+      this._setFileBrowserError(currentPath, error);
+      this._fileBrowserMarkup = this._renderFileBrowserError(this._fileBrowserError);
+    } finally {
+      this._fileBrowserLoading = false;
+      this._fileBrowserRefreshPromise = undefined;
+
+      if (this._pendingFileBrowserRefresh) {
+        this._pendingFileBrowserRefresh = false;
+        await this._refreshFileBrowserMarkup();
+      }
+    }
+  }
+
+  private _setFileBrowserError(dirPath: string, error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error);
+    const code = this._getErrorCode(error);
+    const hint = this._getFileBrowserErrorHint(message, code);
+
+    this._fileBrowserError = { path: dirPath, message, hint, code };
+
+    if (this._isMountAccessError(message, code)) {
+      this._autoRefreshSuspended = true;
+      if (this._currentConnection) {
+        this._connectionManager.reportMountAccessFailure(this._currentConnection.config.name, {
+          path: dirPath,
+          message,
+          code,
+        });
+      }
+    }
+  }
+
+  private _renderFileBrowserError(error: FileBrowserErrorState | undefined): string {
+    const hint = error?.hint ?? '';
+    return `
+      <li class="file-item" style="color: var(--vscode-errorForeground)">
+        <span class="codicon codicon-error"></span> Error reading directory${hint}
+      </li>
+      <li class="file-item">
+        <button class="action-button" data-action="reconnect" style="margin-left: 24px; margin-top: 8px;">
+          <span class="codicon codicon-refresh"></span> Reconnect
+        </button>
+      </li>
+    `;
+  }
+
+  private _clearFileBrowserFailureState(): void {
+    this._fileBrowserError = undefined;
+    this._autoRefreshSuspended = false;
+  }
+
+  private _getErrorCode(error: unknown): string | undefined {
+    if (typeof error === 'object' && error !== null && 'code' in error) {
+      return String((error as NodeJS.ErrnoException).code);
+    }
+
+    return undefined;
+  }
+
+  private _isMountAccessError(message: string, code?: string): boolean {
+    const normalized = `${code ?? ''} ${message}`.toLowerCase();
+    return ['eio', 'ebusy', 'enoent', 'etimedout', 'eacces', 'enotconn'].some(token => normalized.includes(token))
+      || normalized.includes('i/o error')
+      || normalized.includes('not accessible')
+      || normalized.includes('timed out')
+      || normalized.includes('permission denied');
+  }
+
+  private _getFileBrowserErrorHint(message: string, code?: string): string {
+    const normalized = `${code ?? ''} ${message}`.toLowerCase();
+
+    if (normalized.includes('enoent') || normalized.includes('not accessible') || normalized.includes('eio')) {
+      return ' - Drive may be disconnected. Try reconnecting.';
+    }
+
+    if (normalized.includes('etimedout') || normalized.includes('timeout')) {
+      return ' - Connection timed out. Try reconnecting.';
+    }
+
+    if (normalized.includes('eacces') || normalized.includes('permission')) {
+      return ' - Permission denied.';
+    }
+
+    return '';
   }
 
   /**

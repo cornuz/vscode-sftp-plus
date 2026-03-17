@@ -2,6 +2,14 @@
 
 All notable changes to the SFTP+ extension will be documented in this file.
 
+## [0.2.6] - 2026-03-17
+
+### Fixed
+
+- **🔁 Prevented UI freeze after mount loss** — The host file browser no longer performs blocking synchronous filesystem reads while rendering, reducing the risk of an unresponsive extension host when a mounted drive becomes unreadable.
+- **🧯 Stopped reconnect-related refresh loops** — Connections with `autoReconnectOnDrop` enabled now stop the file browser auto-refresh when the mounted drive starts returning I/O errors, preventing repeated refresh/reload churn against a broken mount.
+- **🩺 Better mount failure recovery** — Mount accessibility is now treated as part of connection health, so unreadable drives transition out of the stale `connected` state and can trigger a cleaner reconnect path.
+
 ## [0.2.5] - 2026-03-13
 
 ### Added

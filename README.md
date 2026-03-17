@@ -252,6 +252,8 @@ winget install WinFsp.WinFsp
 3. For FTPS certificate failures, open the host **Console** tab and enable `ignoreCertErrors` if you want to auto-accept the certificate
 4. Check the host **Console** tab and the Output panel (View → Output → SFTP+) for logs
 
+> **Fix in 0.2.6**: a bug that could cause a refresh/reconnect loop after mount loss when `autoReconnectOnDrop` was enabled has been corrected. If the mounted drive becomes unreadable, SFTP+ now suspends the file browser auto-refresh and falls back to a cleaner recovery path instead of repeatedly reloading against a broken mount.
+
 ### Drive not appearing
 
 The mount may take a few seconds. Check for available drive letters.
