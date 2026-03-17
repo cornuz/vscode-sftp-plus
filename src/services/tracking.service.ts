@@ -297,12 +297,12 @@ export class TrackingService {
 
     try {
       // Check if local file exists
-      if (!fs.existsSync(localFullPath)) {
+      if (!(await this._pathExists(localFullPath))) {
         return SyncStatus.NotDownloaded;
       }
 
       // Check if remote file exists (on mounted drive)
-      if (!fs.existsSync(trackedFile.fullRemotePath)) {
+      if (!(await this._pathExists(trackedFile.fullRemotePath))) {
         return SyncStatus.Error;
       }
 
@@ -337,6 +337,15 @@ export class TrackingService {
     } catch (error) {
       Logger.error('Failed to get sync status:', error);
       return SyncStatus.Error;
+    }
+  }
+
+  private async _pathExists(targetPath: string): Promise<boolean> {
+    try {
+      await fs.promises.access(targetPath, fs.constants.F_OK);
+      return true;
+    } catch {
+      return false;
     }
   }
 
