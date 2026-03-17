@@ -53,6 +53,8 @@ export class ConnectionManager implements vscode.Disposable {
   private static readonly HEALTH_CHECK_MAX_FAILURES = 3;
   /** Number of consecutive mount-access failures before marking disconnected */
   private static readonly MOUNT_ACCESS_MAX_FAILURES = 2;
+  /** Maximum time spent probing a mounted drive before treating it as inaccessible */
+  private static readonly MOUNT_ACCESS_CHECK_TIMEOUT_MS = 3000;
 
   private static readonly WORKSPACE_CONFIG_FILE = '.vscode/sftp_plus.json';
   private workspaceConfigCache?: WorkspaceConfigCache;
@@ -527,6 +529,7 @@ export class ConnectionManager implements vscode.Disposable {
     connection.mountAccessFailCount = 0;
 
     this.appendSessionLog(name, 'connect', 'error', `${failureMessage}: ${details.message}`);
+    this._cleanupMountProcess(connection, name, 'mount became unreadable');
     this._onDidChangeConnections.fire();
 
     if (shouldAutoReconnect) {
@@ -578,12 +581,50 @@ export class ConnectionManager implements vscode.Disposable {
   }
 
   private async isMountedDriveAccessible(mountPath: string): Promise<boolean> {
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    const timeoutPromise = new Promise<boolean>((resolve) => {
+      timeoutHandle = setTimeout(() => {
+        Logger.warn(`Timed out while probing mounted drive accessibility for ${mountPath}`);
+        resolve(false);
+      }, ConnectionManager.MOUNT_ACCESS_CHECK_TIMEOUT_MS);
+    });
+
     try {
-      await fs.promises.access(mountPath, fs.constants.R_OK);
-      return true;
+      const isAccessible = await Promise.race([
+        fs.promises.access(mountPath, fs.constants.R_OK).then(() => true).catch(() => false),
+        timeoutPromise,
+      ]);
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
+      return isAccessible;
     } catch {
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
       return false;
     }
+  }
+
+  private _cleanupMountProcess(connection: Connection, name: string, reason: string): void {
+    const processId = connection.processId;
+    if (!processId) {
+      return;
+    }
+
+    void (async () => {
+      try {
+        await this.rcloneService.unmount(processId);
+        Logger.info(`Cleaned up rclone process ${processId} for "${name}" after ${reason}`);
+      } catch (error) {
+        Logger.warn(`Failed to clean up rclone process ${processId} for "${name}" after ${reason}: ${error instanceof Error ? error.message : String(error)}`);
+      } finally {
+        const current = this.connections.get(name);
+        if (current && current.processId === processId) {
+          current.processId = undefined;
+        }
+      }
+    })();
   }
 
   /**
@@ -649,6 +690,8 @@ export class ConnectionManager implements vscode.Disposable {
       throw new Error(`Connection "${name}" not found`);
     }
 
+    let mountProcess: ChildProcess | undefined;
+
     if (connection.status === ConnectionStatus.Connected) {
       Logger.info(`Already connected to ${name}`);
       return;
@@ -711,6 +754,7 @@ export class ConnectionManager implements vscode.Disposable {
 
       // Start mount (returns process and RC port)
       const { process, rcPort } = this.rcloneService.mount(connection.config, obscuredPassword, driveLetter);
+      mountProcess = process;
       this.attachMountLogging(name, process);
 
       // Wait for mount to be ready
@@ -733,10 +777,22 @@ export class ConnectionManager implements vscode.Disposable {
       vscode.window.showInformationMessage(`SFTP+: Connected to ${name} (${driveLetter}:)`);
 
     } catch (error) {
+      if (mountProcess?.pid) {
+        try {
+          await this.rcloneService.unmount(mountProcess.pid);
+          Logger.info(`Cleaned up failed mount process ${mountProcess.pid} for "${name}" after connect error`);
+        } catch (cleanupError) {
+          Logger.warn(`Failed to clean up failed mount process ${mountProcess.pid} for "${name}": ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`);
+        }
+      }
+
       const diagnostic = this.rcloneService.classifyConnectionError(error, connection.config.ignoreCertErrors);
       this.setLastDiagnostic(name, diagnostic);
       connection.status = ConnectionStatus.Error;
       connection.error = diagnostic.message;
+      connection.mountedDrive = undefined;
+      connection.processId = undefined;
+      connection.rcPort = undefined;
       this.appendSessionLog(name, 'connect', 'error', diagnostic.message);
       Logger.error(`Failed to connect to ${name}`, error);
       const action = diagnostic.canAcceptCertificate
@@ -774,13 +830,15 @@ export class ConnectionManager implements vscode.Disposable {
    * Falls back to the normal connect() flow only if no cached password exists
    * (e.g. after a VS Code restart), which may prompt the user.
    */
-  async reconnect(name: string, options?: { silent?: boolean; reason?: string; requireCachedCredentials?: boolean }): Promise<void> {
+  async reconnect(name: string, options?: { silent?: boolean; reason?: string; requireCachedCredentials?: boolean; force?: boolean }): Promise<void> {
     const connection = this.connections.get(name);
     if (!connection) {
       throw new Error(`Connection "${name}" not found`);
     }
 
-    if (connection.status === ConnectionStatus.Connected) {
+    let mountProcess: ChildProcess | undefined;
+
+    if (connection.status === ConnectionStatus.Connected && !options?.force) {
       Logger.info(`Already connected to ${name}`);
       return;
     }
@@ -838,6 +896,7 @@ export class ConnectionManager implements vscode.Disposable {
         }
 
         const { process, rcPort } = this.rcloneService.mount(connection.config, reconnectObscuredPassword, driveLetter);
+        mountProcess = process;
         this.attachMountLogging(name, process);
 
         const mounted = await this.waitForMount(driveLetter, 15000);
@@ -859,10 +918,23 @@ export class ConnectionManager implements vscode.Disposable {
         }
 
       } catch (error) {
+        if (mountProcess?.pid) {
+          try {
+            await this.rcloneService.unmount(mountProcess.pid);
+            Logger.info(`Cleaned up failed mount process ${mountProcess.pid} for "${name}" after reconnect error`);
+          } catch (cleanupError) {
+            Logger.warn(`Failed to clean up failed mount process ${mountProcess.pid} for "${name}": ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`);
+          }
+        }
+
         connection.status = ConnectionStatus.Error;
         connection.error = error instanceof Error ? error.message : String(error);
+        connection.mountedDrive = undefined;
+        connection.processId = undefined;
+        connection.rcPort = undefined;
         this.appendSessionLog(name, 'connect', 'error', connection.error);
         Logger.error(`Failed to reconnect to "${name}"`, error);
+        this._onDidChangeConnections.fire();
         if (!options?.silent) {
           vscode.window.showErrorMessage(`SFTP+: Failed to reconnect to ${name}: ${connection.error}`);
         }
@@ -1244,7 +1316,7 @@ export class ConnectionManager implements vscode.Disposable {
     const mountPoint = `${driveLetter}:\\`;
 
     while (Date.now() - start < timeout) {
-      if (await DriveUtils.driveExists(mountPoint)) {
+      if (await this.isMountedDriveAccessible(mountPoint)) {
         return true;
       }
       await new Promise(resolve => setTimeout(resolve, 500));

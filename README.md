@@ -6,7 +6,7 @@
 
 **Full read/write access to SFTP/FTPS servers in VS Code with AI/Copilot integration**
 
-SFTP+ solves the read-only limitation of existing SFTP extensions by mounting remote servers as native Windows drives using [rclone](https://rclone.org/) and [WinFsp](https://winfsp.dev/). **NEW in v0.2.5**: out-of-sync tracked files can now be compared visually in VS Code, optionally reviewed by the active MCP agent, and same-size local edits are detected correctly as `local-newer`.
+SFTP+ solves the read-only limitation of existing SFTP extensions by mounting remote servers as native Windows drives using [rclone](https://rclone.org/) and [WinFsp](https://winfsp.dev/). **NEW in v0.2.7**: the Host Details panel now keeps a stable tab order, switches more reliably between `Settings`, `Console`, and `Files`, and recovers more cleanly when a mounted drive becomes unreadable.
 
 ## Features
 
@@ -252,7 +252,7 @@ winget install WinFsp.WinFsp
 3. For FTPS certificate failures, open the host **Console** tab and enable `ignoreCertErrors` if you want to auto-accept the certificate
 4. Check the host **Console** tab and the Output panel (View → Output → SFTP+) for logs
 
-> **Fix in 0.2.6**: a bug that could cause a refresh/reconnect loop after mount loss when `autoReconnectOnDrop` was enabled has been corrected. If the mounted drive becomes unreadable, SFTP+ now suspends the file browser auto-refresh and falls back to a cleaner recovery path instead of repeatedly reloading against a broken mount.
+> **Fix in 0.2.7**: the Host Details panel now keeps a stable `Settings > Console > Files` order, returns focus to `Console` during disconnect, and switches to `Files` as soon as the mounted drive is ready. Together with the 0.2.6 mount-recovery work, this removes the tab flashing and inconsistent post-connect focus observed during reconnect and new-session testing.
 
 ### Drive not appearing
 

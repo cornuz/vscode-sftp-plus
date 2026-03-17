@@ -61,6 +61,9 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
   private _autoRefreshSuspended = false;
   private _fileBrowserRefreshPromise?: Promise<void>;
   private _pendingFileBrowserRefresh = false;
+  private _viewGeneration = 0;
+  private _fileBrowserReady = false;
+  private _pendingAutoSwitchToFiles = false;
 
   constructor(
     private readonly _extensionUri: vscode.Uri,
@@ -120,29 +123,47 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
     this._currentConnection = connection;
     this._isNewConnection = false;
     this._currentPrerequisite = undefined; // Clear prerequisite when showing connection
+    const hasMountedDrive = !!connection.mountedDrive;
+    const isDisconnecting = connection.status === ConnectionStatus.Disconnecting;
+    const isConnecting = connection.status === ConnectionStatus.Connecting;
 
-    if (connection.status === ConnectionStatus.Connected && connection.mountedDrive) {
+    if (hasMountedDrive) {
       this._clearFileBrowserFailureState();
+      this._fileBrowserReady = false;
+      this._pendingAutoSwitchToFiles = true;
       this._fileBrowserMarkup = '<li class="file-item empty"><span class="codicon codicon-loading codicon-modifier-spin"></span> Loading files...</li>';
     }
 
     // Auto-switch tab based on connection status
     if (connectionChanged) {
-      if (connection.status === ConnectionStatus.Connected && connection.mountedDrive) {
-        // Connected: show Files tab
+      if (hasMountedDrive) {
+        // Mounted: show Files immediately, content handles loading state
         this._currentTab = 'files';
         this._currentPath = `${connection.mountedDrive}:\\`;
-      } else if (connection.status === ConnectionStatus.Connecting) {
+        this._pendingAutoSwitchToFiles = true;
+        this._fileBrowserReady = false;
+      } else if (isConnecting || isDisconnecting) {
         this._currentTab = 'console';
         this._currentPath = undefined;
+        this._pendingAutoSwitchToFiles = false;
+        this._fileBrowserReady = false;
       } else {
-        // Disconnected: show Settings tab
+        // Disconnected host selection: show Settings tab
         this._currentTab = 'settings';
         this._currentPath = undefined;
+        this._pendingAutoSwitchToFiles = false;
+        this._fileBrowserReady = false;
       }
       // Clear cached password when switching connections
       this._cachedPassword = undefined;
+    } else if (isConnecting || isDisconnecting) {
+      this._currentTab = 'console';
+      this._currentPath = undefined;
+      this._pendingAutoSwitchToFiles = false;
+      this._fileBrowserReady = false;
     }
+
+    void this._updateView();
 
     // Load password async and update view
     this._loadPasswordAndUpdate(connection.config.name);
@@ -201,6 +222,8 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
       this._currentPath = `${connection.mountedDrive}:\\`;
     }
     this._clearFileBrowserFailureState();
+    this._fileBrowserReady = false;
+    this._pendingAutoSwitchToFiles = true;
     this._fileBrowserMarkup = '<li class="file-item empty"><span class="codicon codicon-loading codicon-modifier-spin"></span> Loading files...</li>';
     this._updateView();
     this._revealView();
@@ -213,13 +236,9 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
     this._currentConnection = undefined;
     this._currentPath = undefined;
     this._cachedPassword = undefined;
+    this._resetTransientViewState();
     this._clearFileBrowserFailureState();
     this._fileBrowserMarkup = '<li class="file-item empty"><span class="codicon codicon-info"></span> No active connection</li>';
-    // Stop auto-refresh timer
-    if (this._autoRefreshTimer) {
-      clearInterval(this._autoRefreshTimer);
-      this._autoRefreshTimer = undefined;
-    }
     this._updateView();
   }
 
@@ -236,32 +255,42 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
       const wasConnected = this._currentConnection.status === ConnectionStatus.Connected;
       const isNowConnected = freshConnection.status === ConnectionStatus.Connected;
       const isConnecting = freshConnection.status === ConnectionStatus.Connecting;
+      const isDisconnecting = freshConnection.status === ConnectionStatus.Disconnecting;
+      const hasMountedDrive = !!freshConnection.mountedDrive;
 
       this._currentConnection = freshConnection;
 
       // Auto-switch tab when connection status changes
-      if (wasConnected && !isNowConnected) {
-        // Just disconnected: switch to Settings, clear path
-        this._currentTab = 'settings';
-        this._currentPath = undefined;
-      } else if (isConnecting) {
+      if (hasMountedDrive) {
+        // Mounted: show Files immediately, content handles loading state
+        this._clearFileBrowserFailureState();
+        this._pendingAutoSwitchToFiles = true;
+        this._fileBrowserReady = false;
+        this._currentTab = 'files';
+        this._currentPath = `${freshConnection.mountedDrive}:\\`;
+      } else if (wasConnected && !isNowConnected) {
+        // Just disconnected: switch to Console, clear path
         this._currentTab = 'console';
         this._currentPath = undefined;
-      } else if (!wasConnected && isNowConnected && freshConnection.mountedDrive) {
-        // Just connected: switch to Files and set path
-        this._clearFileBrowserFailureState();
-        if (this._currentTab !== 'console') {
-          this._currentTab = 'files';
-        }
-        this._currentPath = `${freshConnection.mountedDrive}:\\`;
+        this._resetTransientViewState();
+      } else if (isConnecting || isDisconnecting) {
+        this._currentTab = 'console';
+        this._currentPath = undefined;
+        this._selectedFile = undefined;
+        this._pendingAutoSwitchToFiles = false;
+        this._fileBrowserReady = false;
       } else if (isNowConnected && freshConnection.mountedDrive && this._currentTab === 'settings') {
-        // Already connected but still on settings tab: switch to Files
+        // Already connected but still on settings tab: show Files immediately
         this._clearFileBrowserFailureState();
+        this._pendingAutoSwitchToFiles = true;
+        this._fileBrowserReady = false;
         this._currentTab = 'files';
         if (!this._currentPath) {
           this._currentPath = `${freshConnection.mountedDrive}:\\`;
         }
       }
+
+      void this._updateView();
 
       // Reload password (may have been deleted or changed)
       this._loadPasswordAndUpdate(freshConnection.config.name);
@@ -315,14 +344,31 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
     _context: vscode.WebviewViewResolveContext,
     _token: vscode.CancellationToken
   ): void {
+    this._viewGeneration += 1;
+    const viewGeneration = this._viewGeneration;
     this._view = webviewView;
 
     webviewView.webview.options = {
       enableScripts: true,
-      localResourceRoots: [this._extensionUri],
+      localResourceRoots: [vscode.Uri.joinPath(this._extensionUri, 'resources')],
     };
 
+    webviewView.onDidDispose(() => {
+      if (!this._isActiveView(webviewView, viewGeneration)) {
+        return;
+      }
+
+      Logger.debug('Host details webview disposed');
+      this._viewGeneration += 1;
+      this._view = undefined;
+      this._resetTransientViewState();
+    });
+
     webviewView.webview.onDidReceiveMessage(async (message) => {
+      if (!this._isActiveView(webviewView, viewGeneration)) {
+        return;
+      }
+
       switch (message.command) {
         case 'switchTab':
           this._currentTab = message.tab;
@@ -444,7 +490,7 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
         case 'refresh':
           await this._updateView(true);
           // Notify webview that refresh is complete
-          this._view?.webview.postMessage({ command: 'refreshComplete' });
+          await this._postMessageToView({ command: 'refreshComplete' }, webviewView, viewGeneration);
           break;
 
         case 'toggleSize':
@@ -469,7 +515,7 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
           this._searchFilter = message.query || '';
           this._updateView();
           // Restore focus to search input after update
-          this._view?.webview.postMessage({ command: 'focusSearch', cursorPos: message.cursorPos });
+          await this._postMessageToView({ command: 'focusSearch', cursorPos: message.cursorPos }, webviewView, viewGeneration);
           break;
 
         case 'installPrerequisite':
@@ -507,12 +553,10 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
           if (this._currentConnection) {
             try {
               this._clearFileBrowserFailureState();
-              // First disconnect
-              await vscode.commands.executeCommand('sftp-plus.disconnect', this._currentConnection.config.name);
-              // Wait a bit for cleanup
-              await new Promise(resolve => setTimeout(resolve, 500));
-              // Then reconnect
-              await vscode.commands.executeCommand('sftp-plus.connect', this._currentConnection.config.name);
+              await this._connectionManager.reconnect(this._currentConnection.config.name, {
+                reason: 'manual reconnect',
+                force: true,
+              });
             } catch (error) {
               Logger.error(`Reconnect failed: ${error}`);
               vscode.window.showErrorMessage(`Failed to reconnect: ${error}`);
@@ -529,21 +573,53 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
     this._updateView();
   }
 
+  private _clearAutoRefreshTimer(): void {
+    if (this._autoRefreshTimer) {
+      clearInterval(this._autoRefreshTimer);
+      this._autoRefreshTimer = undefined;
+    }
+  }
+
+  private _resetTransientViewState(): void {
+    this._clearAutoRefreshTimer();
+    this._fileBrowserLoading = false;
+    this._fileBrowserRefreshPromise = undefined;
+    this._pendingFileBrowserRefresh = false;
+    this._selectedFile = undefined;
+    this._pendingAutoSwitchToFiles = false;
+    this._fileBrowserReady = false;
+  }
+
+  private _isActiveView(view: vscode.WebviewView, generation: number): boolean {
+    return this._view === view && this._viewGeneration === generation;
+  }
+
+  private async _postMessageToView(message: unknown, view: vscode.WebviewView, generation: number): Promise<void> {
+    if (!this._isActiveView(view, generation)) {
+      return;
+    }
+
+    try {
+      await view.webview.postMessage(message);
+    } catch (error) {
+      Logger.debug(`Skipping postMessage for disposed host details webview: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   /**
    * Start or stop auto-refresh timer based on current connection and tab
    */
   private _updateAutoRefreshTimer(): void {
     // Clear any existing timer
-    if (this._autoRefreshTimer) {
-      clearInterval(this._autoRefreshTimer);
-      this._autoRefreshTimer = undefined;
-    }
+    this._clearAutoRefreshTimer();
 
     // Only auto-refresh when on Files tab with a connected connection and syncRate > 0
     if (
+      this._view &&
       this._currentConnection &&
       this._currentTab === 'files' &&
-      this._currentConnection.status === ConnectionStatus.Connected &&
+      this._fileBrowserReady &&
+      !!this._currentConnection.mountedDrive &&
       this._currentConnection.config.syncRate > 0 &&
       !this._autoRefreshSuspended
     ) {
@@ -557,13 +633,24 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
   }
 
   private async _updateView(forceFileBrowserReload = false): Promise<void> {
-    if (!this._view) return;
+    const targetView = this._view;
+    const viewGeneration = this._viewGeneration;
+    if (!targetView) {
+      this._clearAutoRefreshTimer();
+      return;
+    }
 
     // Update auto-refresh timer
     this._updateAutoRefreshTimer();
 
+    const shouldPrepareFileBrowser = !!(
+      this._currentConnection &&
+      this._currentConnection.mountedDrive &&
+      (this._currentTab === 'files' || !this._fileBrowserReady || this._pendingAutoSwitchToFiles)
+    );
+
     // Load tracked files with sync status for current connection
-    if (this._currentConnection && this._currentTab === 'files' && this._currentConnection.mountedDrive) {
+    if (shouldPrepareFileBrowser && this._currentConnection?.mountedDrive) {
       const trackedFiles = await this._trackingService.getTrackedFilesForConnection(
         this._currentConnection.config.name,
         this._currentConnection.mountedDrive
@@ -575,6 +662,10 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
         this._trackedFiles.set(file.fullRemotePath, { file, status });
       }
 
+      if (!this._isActiveView(targetView, viewGeneration)) {
+        return;
+      }
+
       await this._refreshFileBrowserMarkup(forceFileBrowserReload);
     } else {
       this._trackedFiles.clear();
@@ -582,7 +673,12 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
       this._fileBrowserLoading = false;
     }
 
-    this._view.webview.html = this._getHtml();
+    if (!this._isActiveView(targetView, viewGeneration)) {
+      Logger.debug('Skipping stale host details render');
+      return;
+    }
+
+    targetView.webview.html = this._getHtml(targetView.webview);
   }
 
   private async _saveConnection(formData: ConnectionConfigWithPassword): Promise<void> {
@@ -710,11 +806,12 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private _getHtml(): string {
+  private _getHtml(webview: vscode.Webview): string {
     const nonce = this._getNonce();
+    const cspSource = webview.cspSource;
 
     // Get codicon font URI from resources folder (bundled with extension)
-    const codiconsUri = this._view?.webview.asWebviewUri(
+    const codiconsUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this._extensionUri, 'resources', 'codicon.css')
     );
 
@@ -723,7 +820,7 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; font-src ${this._view?.webview.cspSource}; style-src ${this._view?.webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; font-src ${cspSource}; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
   <title>Host Details</title>
   ${codiconsUri ? `<link href="${codiconsUri}" rel="stylesheet" />` : ''}
   <style>
@@ -1094,6 +1191,14 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
       background: var(--vscode-toolbar-activeBackground);
       border-color: var(--vscode-focusBorder);
     }
+    .browser-loading-note {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 8px 0;
+      font-size: 12px;
+      color: var(--vscode-descriptionForeground);
+    }
 
     .file-list {
       list-style: none;
@@ -1120,6 +1225,10 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
       font-size: 14px;
       color: var(--vscode-foreground);
       flex-shrink: 0;
+    }
+    .file-item .chevron.loading {
+      animation: spin 1s linear infinite;
+      opacity: 0.8;
     }
     .file-item .chevron-spacer {
       width: 16px;
@@ -1347,25 +1456,25 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
     const settingsActive = this._currentTab === 'settings' ? 'active' : '';
     const consoleActive = this._currentTab === 'console' ? 'active' : '';
     const filesActive = this._currentTab === 'files' ? 'active' : '';
-    const isConnected = this._currentConnection?.status === ConnectionStatus.Connected;
+    const isConnected = !!this._currentConnection?.mountedDrive || this._currentConnection?.status === ConnectionStatus.Connected;
     const hasConnection = !!this._currentConnection;
 
     // Get scope label for settings tab
     let scopeLabel = '';
     if (this._currentConnection) {
-      scopeLabel = this._currentConnection.scope === 'workspace' ? ' (workspace)' : ' (global)';
+      scopeLabel = this._currentConnection.scope === 'workspace' ? ' (WS)' : ' (GL)';
     } else if (this._isNewConnection) {
       // New connection will be workspace if available
-      scopeLabel = this._connectionManager.hasWorkspace() ? ' (workspace)' : ' (global)';
+      scopeLabel = this._connectionManager.hasWorkspace() ? ' (WS)' : ' (GL)';
     }
 
     if (isConnected) {
-      // Connected: Files tab first (primary), Settings second
+      // Connected: keep a stable left-to-right tab order
       return `
         <div class="tabs">
-          <button class="tab ${filesActive}" data-tab="files"><span class="codicon codicon-folder"></span> Files</button>
-          <button class="tab ${consoleActive}" data-tab="console"><span class="codicon codicon-output"></span> Console</button>
           <button class="tab ${settingsActive}" data-tab="settings"><span class="codicon codicon-gear"></span> Settings${scopeLabel}</button>
+          <button class="tab ${consoleActive}" data-tab="console"><span class="codicon codicon-output"></span> Console</button>
+          <button class="tab ${filesActive}" data-tab="files"><span class="codicon ${this._fileBrowserLoading && !this._fileBrowserReady ? 'codicon-loading codicon-modifier-spin' : 'codicon-list-tree'}"></span> Files</button>
         </div>
       `;
     } else if (hasConnection) {
@@ -1541,10 +1650,10 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
     if (!isNew && this._currentConnection) {
       const passwordSource = this._currentConnection.passwordSource;
       if (passwordSource === 'secret') {
-        passwordLabel = 'Password <span class="label-badge secret">(secret)</span>';
+        passwordLabel = 'Password <span class="label-badge secret">(SS)</span>';
         passwordDeleteBtn = `<button type="button" class="btn-icon btn-delete-password" id="deletePasswordBtn" title="Delete saved password"><span class="codicon codicon-trash"></span></button>`;
       } else if (passwordSource === 'workspace') {
-        passwordLabel = 'Password <span class="label-badge workspace">(workspace)</span>';
+        passwordLabel = 'Password <span class="label-badge workspace">(WS)</span>';
       }
     }
 
@@ -1642,7 +1751,7 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
   }
 
   private _getFileBrowserHtml(): string {
-    if (!this._currentConnection || this._currentConnection.status !== ConnectionStatus.Connected) {
+    if (!this._currentConnection || !this._currentConnection.mountedDrive) {
       return `
         <div class="empty-state">
           <div class="icon"><span class="codicon codicon-debug-disconnect" style="font-size: 48px;"></span></div>
@@ -1665,6 +1774,9 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
     const dateActiveClass = this._showFileDate ? 'active' : '';
 
     const showAgentReview = this._currentConnection?.mcpActive === true;
+    const loadingState = this._fileBrowserLoading && !this._fileBrowserReady
+      ? '<div class="browser-loading-note"><span class="codicon codicon-loading codicon-modifier-spin"></span> Preparing file tree...</div>'
+      : '';
 
     return `
       <div class="file-browser-container">
@@ -1678,6 +1790,7 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
           <button class="btn-toggle ${sizeActiveClass}" id="toggleSizeBtn" title="Toggle file size"><span class="codicon codicon-symbol-numeric"></span></button>
           <button class="btn-toggle ${dateActiveClass}" id="toggleDateBtn" title="Toggle modification date"><span class="codicon codicon-calendar"></span></button>
         </div>
+        ${loadingState}
         <div class="file-list-container">
           <ul class="file-list">
             ${files}
@@ -1884,6 +1997,11 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
       if (refreshKey === currentKey) {
         this._fileBrowserMarkup = markup;
         this._fileBrowserError = undefined;
+        this._fileBrowserReady = true;
+        if (this._pendingAutoSwitchToFiles) {
+          this._pendingAutoSwitchToFiles = false;
+          this._currentTab = 'files';
+        }
         if (this._currentConnection) {
           this._connectionManager.resetMountAccessFailures(this._currentConnection.config.name);
         }
@@ -1910,6 +2028,8 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
     const hint = this._getFileBrowserErrorHint(message, code);
 
     this._fileBrowserError = { path: dirPath, message, hint, code };
+    this._fileBrowserReady = false;
+    this._pendingAutoSwitchToFiles = false;
 
     if (this._isMountAccessError(message, code)) {
       this._autoRefreshSuspended = true;
@@ -2725,6 +2845,11 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
           const action = item.dataset.action;
           const filePath = item.dataset.path;
           if (action === 'toggle') {
+            const chevron = item.querySelector('.chevron');
+            if (chevron) {
+              chevron.classList.remove('codicon-chevron-right', 'codicon-chevron-down');
+              chevron.classList.add('codicon-loading', 'codicon-modifier-spin', 'loading');
+            }
             // Clear selection when toggling folder
             if (!e.ctrlKey && !e.metaKey) {
               document.querySelectorAll('.file-item.selected').forEach(el => el.classList.remove('selected'));

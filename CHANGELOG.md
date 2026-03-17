@@ -2,6 +2,19 @@
 
 All notable changes to the SFTP+ extension will be documented in this file.
 
+## [0.2.7] - 2026-03-17
+
+### Improved
+
+- **🧭 Stable Host Details navigation** — The Details panel now keeps a consistent `Settings > Console > Files` tab order across disconnected, connecting, connected, and disconnecting states.
+- **🎯 Clearer tab focus transitions** — Host selection focuses `Settings`, connect/disconnect operations focus `Console`, and the panel switches to `Files` as soon as the mount is available, reducing visual churn during reconnects and new sessions.
+- **🏷️ Tighter labels in the Details panel** — Scope and password-source badges now use shorter labels such as `WS`, `GL`, and `SS`, keeping the tab strip and settings form compact.
+
+### Fixed
+
+- **🔌 Disconnect now returns cleanly to Console** — Disconnecting a host no longer leaves the panel visually stuck on `Files`; the Details view now tracks the disconnect transition and restores the expected console focus.
+- **🗂️ Files tab icon and readiness feedback** — The `Files` tab now uses a more explicit tree icon and its loading state aligns better with the actual mount readiness, avoiding misleading clicks while the webview is still preparing.
+
 ## [0.2.6] - 2026-03-17
 
 ### Fixed
