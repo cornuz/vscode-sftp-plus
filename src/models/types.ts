@@ -54,6 +54,9 @@ export interface ConnectionConfig {
   /** Sync rate in seconds for file browser auto-refresh (default: 60) */
   syncRate: number;
 
+  /** Preserve symlinks on servers that require the rclone --links flag */
+  linksSupported: boolean;
+
   /** Password stored in workspace JSON file (for compatibility, not recommended) */
   password?: string;
 }
@@ -61,7 +64,7 @@ export interface ConnectionConfig {
 /**
  * Classified connection failure categories
  */
-export type ConnectionDiagnosticKind = 'certificate' | 'authentication' | 'timeout' | 'network' | 'unknown';
+export type ConnectionDiagnosticKind = 'certificate' | 'authentication' | 'timeout' | 'network' | 'symlink' | 'unknown';
 
 /**
  * Structured connection diagnostic returned by test/connect flows
@@ -192,6 +195,7 @@ export const DEFAULT_CONNECTION_CONFIG: Partial<ConnectionConfig> = {
   cacheMode: 'full',
   idleTimeout: '5m',
   syncRate: 60,
+  linksSupported: true,
 };
 
 /**

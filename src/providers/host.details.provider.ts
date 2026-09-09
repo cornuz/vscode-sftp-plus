@@ -29,12 +29,20 @@ interface FileBrowserErrorState {
   code?: string;
 }
 
+interface FileMetadataCacheEntry {
+  size: number;
+  mtime: Date;
+  expiresAt: number;
+}
+
 /**
  * WebviewView provider that shows host details with tabs:
  * - Settings: Connection configuration form
  * - Files: File browser for connected hosts
  */
 export class HostDetailsProvider implements vscode.WebviewViewProvider {
+  private static readonly FILE_METADATA_CACHE_TTL_MS = 5000;
+
   public static readonly viewType = 'sftp-plus.hostDetails';
 
   private _view?: vscode.WebviewView;
@@ -64,6 +72,8 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
   private _viewGeneration = 0;
   private _fileBrowserReady = false;
   private _pendingAutoSwitchToFiles = false;
+  private _fileMetadataCache = new Map<string, FileMetadataCacheEntry>();
+  private _renderGeneration = 0;
 
   constructor(
     private readonly _extensionUri: vscode.Uri,
@@ -307,6 +317,7 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
   async refreshTrackedFiles(): Promise<void> {
     // Rescan local .sftp-plus files to update tracking.json
     await this._trackingService.autoScanLocalFiles();
+    this._fileMetadataCache.clear();
     // Clear cache and reload tracked files with fresh sync status
     this._trackingService.clearCache();
     await this._updateView();
@@ -588,6 +599,7 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
     this._selectedFile = undefined;
     this._pendingAutoSwitchToFiles = false;
     this._fileBrowserReady = false;
+    this._fileMetadataCache.clear();
   }
 
   private _isActiveView(view: vscode.WebviewView, generation: number): boolean {
@@ -625,8 +637,9 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
     ) {
       const intervalMs = this._currentConnection.config.syncRate * 1000;
       this._autoRefreshTimer = setInterval(async () => {
-        // Clear tracking cache to force re-check
-        this._trackingService.clearCache();
+        if (this._fileBrowserLoading || this._fileBrowserRefreshPromise) {
+          return;
+        }
         await this._updateView();
       }, intervalMs);
     }
@@ -635,6 +648,7 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
   private async _updateView(forceFileBrowserReload = false): Promise<void> {
     const targetView = this._view;
     const viewGeneration = this._viewGeneration;
+    const renderGeneration = ++this._renderGeneration;
     if (!targetView) {
       this._clearAutoRefreshTimer();
       return;
@@ -662,7 +676,7 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
         this._trackedFiles.set(file.fullRemotePath, { file, status });
       }
 
-      if (!this._isActiveView(targetView, viewGeneration)) {
+      if (!this._isActiveView(targetView, viewGeneration) || renderGeneration !== this._renderGeneration) {
         return;
       }
 
@@ -673,7 +687,7 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
       this._fileBrowserLoading = false;
     }
 
-    if (!this._isActiveView(targetView, viewGeneration)) {
+    if (!this._isActiveView(targetView, viewGeneration) || renderGeneration !== this._renderGeneration) {
       Logger.debug('Skipping stale host details render');
       return;
     }
@@ -698,6 +712,7 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
         autoReconnectOnDrop: formData.autoReconnectOnDrop,
         explicitTls: formData.explicitTls,
         ignoreCertErrors: formData.ignoreCertErrors,
+        linksSupported: formData.linksSupported,
         cacheMode: formData.cacheMode,
         idleTimeout: formData.idleTimeout,
         syncRate: formData.syncRate || 60,
@@ -749,6 +764,7 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
         remotePath: formData.remotePath || '/',
         explicitTls: formData.explicitTls,
         ignoreCertErrors: formData.ignoreCertErrors,
+        linksSupported: formData.linksSupported,
       };
 
       const result = await this._connectionManager.testConnection(config, formData.password);
@@ -1732,6 +1748,11 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
           <label for="ignoreCertErrors">Auto-accept invalid certificate (FTPS)</label>
         </div>
 
+        <div class="checkbox-group">
+          <input type="checkbox" id="linksSupported" name="linksSupported" ${config.linksSupported ? 'checked' : ''}>
+          <label for="linksSupported">Support symlinks (recommended for Unix/Linux hosts)</label>
+        </div>
+
         <div class="form-group" style="margin-top: 12px;">
           <label>Sync Rate (seconds)</label>
           <input type="number" name="syncRate" value="${config.syncRate || 60}" min="5" max="3600" placeholder="60">
@@ -1956,8 +1977,18 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
       return undefined;
     }
 
+    const cached = this._fileMetadataCache.get(fullPath);
+    if (cached && cached.expiresAt > Date.now()) {
+      return { size: cached.size, mtime: cached.mtime };
+    }
+
     const stats = await fs.promises.stat(fullPath);
-    return { size: stats.size, mtime: stats.mtime };
+    const metadata = { size: stats.size, mtime: stats.mtime };
+    this._fileMetadataCache.set(fullPath, {
+      ...metadata,
+      expiresAt: Date.now() + HostDetailsProvider.FILE_METADATA_CACHE_TTL_MS,
+    });
+    return metadata;
   }
 
   private async _refreshFileBrowserMarkup(force = false): Promise<void> {
@@ -2721,6 +2752,7 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
             autoReconnectOnDrop: formData.get('autoReconnectOnDrop') === 'on',
             explicitTls: formData.get('explicitTls') === 'on',
             ignoreCertErrors: formData.get('ignoreCertErrors') === 'on',
+            linksSupported: formData.get('linksSupported') === 'on',
             syncRate: parseInt(formData.get('syncRate')) || 60,
           };
           vscode.postMessage({ command: 'saveConnection', config });
@@ -2738,6 +2770,7 @@ export class HostDetailsProvider implements vscode.WebviewViewProvider {
             remotePath: formData.get('remotePath') || '/',
             explicitTls: formData.get('explicitTls') === 'on',
             ignoreCertErrors: formData.get('ignoreCertErrors') === 'on',
+            linksSupported: formData.get('linksSupported') === 'on',
             autoReconnectOnDrop: formData.get('autoReconnectOnDrop') === 'on',
           };
           vscode.postMessage({ command: 'testConnection', config });

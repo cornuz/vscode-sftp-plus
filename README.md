@@ -6,7 +6,7 @@
 
 **Full read/write access to SFTP/FTPS servers in VS Code with AI/Copilot integration**
 
-SFTP+ solves the read-only limitation of existing SFTP extensions by mounting remote servers as native Windows drives using [rclone](https://rclone.org/) and [WinFsp](https://winfsp.dev/). **NEW in v0.2.7**: the Host Details panel now keeps a stable tab order, switches more reliably between `Settings`, `Console`, and `Files`, and recovers more cleanly when a mounted drive becomes unreadable.
+SFTP+ solves the read-only limitation of existing SFTP extensions by mounting remote servers as native Windows drives using [rclone](https://rclone.org/) and [WinFsp](https://winfsp.dev/). **NEW in v0.2.8**: the Host Details panel now keeps a stable tab order, switches more reliably between `Settings`, `Console`, and `Files`, and recovers more cleanly when a mounted drive becomes unreadable.
 
 ## Features
 
@@ -57,6 +57,19 @@ Once MCP is enabled, Copilot can use these tools:
 | `sftp-plus_reconnect` | Reconnect a dropped connection autonomously when stored credentials are available |
 
 `sftp-plus_list_connections` now returns `recoveryAction`, `recoveryHint`, and `autonomousReconnectAvailable` so the agent can distinguish between immediate reconnect, manual reconnect, and no-op states after a drop or VS Code reload.
+
+### MCP Access Semantics
+
+When Copilot access is enabled, SFTP+ now distinguishes between two path-level modes:
+
+- **Local mode**: the agent may download a granted file locally with `sftp-plus_prepare_edit` and then edit the local copy with normal diff preview.
+- **Host mode**: the agent may directly browse, read, and write the mounted remote path with SFTP+ MCP tools.
+
+Practical consequences:
+
+1. Direct remote browsing and reading (`list_files`, `read_file`, `search_files`, `get_tree`) require **Host** access on the file or one of its parent folders.
+2. `prepare_edit` requires either **Local** or **Host** access on the target file.
+3. If Copilot access is fully disabled for the connection, SFTP+ MCP tools are no longer kept registered for that session state.
 
 ### Sync Status Indicators
 
@@ -146,6 +159,7 @@ winget install WinFsp.WinFsp
 | `autoReconnectOnDrop` | boolean | false | Auto-reconnect when an established connection drops unexpectedly |
 | `cacheMode` | string | "full" | VFS cache mode |
 | `idleTimeout` | string | "0" | Keep-alive timeout (0 = disabled) |
+| `linksSupported` | boolean | true | Add `--links` when the remote exposes symlinks (recommended for Unix/Linux hosts) |
 
 > **Note**: `idleTimeout` is set to `0` by default since v0.1.5, meaning connections stay open as long as VS Code is running. The extension monitors connection health and will notify you if a connection is lost.
 
@@ -193,6 +207,8 @@ You can create or edit `.vscode/sftp_plus.json` manually to configure connection
 To store the password in the workspace file, simply add the `password` field to your connection object. If omitted, SFTP+ will prompt for the password and store it securely in VS Code's SecretStorage.
 
 > **⚠️ Security Warning**: If you add passwords to `sftp_plus.json`, make sure to add `.vscode/sftp_plus.json` to your `.gitignore` to avoid committing credentials to version control.
+
+SFTP+ also adds `.sftp-plus/` to the workspace-local Git exclude file when that workspace is a Git repository, so mirrored working copies and tracking metadata do not pollute normal Git status output.
 
 ### Extension Settings
 
@@ -251,6 +267,18 @@ winget install WinFsp.WinFsp
 2. Verify username and password
 3. For FTPS certificate failures, open the host **Console** tab and enable `ignoreCertErrors` if you want to auto-accept the certificate
 4. Check the host **Console** tab and the Output panel (View → Output → SFTP+) for logs
+
+If the console shows `symlinks not supported without the --links flag`, enable **Support symlinks** on that connection and reconnect. New connections enable this by default, and older saved connections without an explicit value now inherit the safe default automatically. An explicit saved `false` still disables symlink support.
+
+If the console shows `vfs cache: failed to download` together with `forcibly closed by the remote host`, the FTP/FTPS server closed the connection during a file read. In that case:
+1. Reduce `syncRate` or temporarily switch it to `0` while diagnosing the host.
+2. Close the Files tab if it is auto-refreshing tracked files.
+3. Avoid repeated compare/download/read operations until the connection is stable again.
+4. Reconnect the host so SFTP+ can restart a clean rclone mount.
+
+Copilot access and Host write access are different controls:
+1. Disabling **Copilot access** for a connection should remove SFTP+ tools for that connection.
+2. Revoking **Host** mode only removes direct server writes for the selected path. It does not imply that all remote reads are disabled while Copilot access remains enabled.
 
 > **Fix in 0.2.7**: the Host Details panel now keeps a stable `Settings > Console > Files` order, returns focus to `Console` during disconnect, and switches to `Files` as soon as the mounted drive is ready. Together with the 0.2.6 mount-recovery work, this removes the tab flashing and inconsistent post-connect focus observed during reconnect and new-session testing.
 

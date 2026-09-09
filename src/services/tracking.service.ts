@@ -1,8 +1,9 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { TrackedFile, SyncStatus } from '../models';
-import { Logger } from '../utils/logger';
+import { Logger, WorkspaceGitIgnoreUtils } from '../utils';
 
 /**
  * Tracking data stored in .sftp-plus/tracking.json
@@ -33,8 +34,12 @@ export class TrackingService {
   private static readonly ORIGINALS_FOLDER = 'originals';
   private static readonly TRACKING_FILE = 'tracking.json';
   private static readonly DATA_VERSION = 2;
+  private static readonly SYNC_STATUS_CACHE_TTL_MS = 10000;
+  private static readonly MTIME_SYNC_TOLERANCE_MS = 2000;
+  private static readonly MAX_CONTENT_COMPARE_BYTES = 256 * 1024;
 
   private _trackingData: TrackingData | null = null;
+  private _syncStatusCache = new Map<string, { status: SyncStatus; expiresAt: number }>();
 
   constructor() {}
 
@@ -44,6 +49,36 @@ export class TrackingService {
   private _getWorkspaceRoot(): string | undefined {
     const folders = vscode.workspace.workspaceFolders;
     return folders && folders.length > 0 ? folders[0].uri.fsPath : undefined;
+  }
+
+  /**
+   * Prefer the existing file EOL when available, otherwise use the host default.
+   */
+  private _getPreferredFileEol(filePath: string): string {
+    try {
+      if (fs.existsSync(filePath)) {
+        const existingContent = fs.readFileSync(filePath, 'utf8');
+        if (existingContent.includes('\r\n')) {
+          return '\r\n';
+        }
+        if (existingContent.includes('\n')) {
+          return '\n';
+        }
+      }
+    } catch (error) {
+      Logger.debug(`Falling back to platform EOL for ${filePath}: ${error}`);
+    }
+
+    return os.EOL === '\r\n' ? '\r\n' : '\n';
+  }
+
+  /**
+   * Serialize JSON using the preferred file EOL.
+   */
+  private _stringifyJsonForFile(filePath: string, value: unknown): string {
+    const json = JSON.stringify(value, null, 2);
+    const preferredEol = this._getPreferredFileEol(filePath);
+    return preferredEol === '\n' ? json : json.replace(/\n/g, preferredEol);
   }
 
   /**
@@ -71,6 +106,10 @@ export class TrackingService {
 
     try {
       await fs.promises.mkdir(folderPath, { recursive: true });
+      const workspaceRoot = this._getWorkspaceRoot();
+      if (workspaceRoot) {
+        await WorkspaceGitIgnoreUtils.ensurePatterns(workspaceRoot, ['.sftp-plus/']);
+      }
       return folderPath;
     } catch (error) {
       Logger.error('Failed to create tracking folder:', error);
@@ -150,7 +189,7 @@ export class TrackingService {
     if (!filePath) return false;
 
     try {
-      await fs.promises.writeFile(filePath, JSON.stringify(data, null, 2), 'utf-8');
+      await fs.promises.writeFile(filePath, this._stringifyJsonForFile(filePath, data), 'utf-8');
       this._trackingData = data;
       return true;
     } catch (error) {
@@ -294,15 +333,28 @@ export class TrackingService {
     if (!workspaceRoot) return SyncStatus.Error;
 
     const localFullPath = path.join(workspaceRoot, trackedFile.localPath);
+    const cacheKey = `${trackedFile.connectionName}:${trackedFile.remotePath}`;
+    const cached = this._syncStatusCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.status;
+    }
 
     try {
       // Check if local file exists
       if (!(await this._pathExists(localFullPath))) {
+        this._syncStatusCache.set(cacheKey, {
+          status: SyncStatus.NotDownloaded,
+          expiresAt: Date.now() + TrackingService.SYNC_STATUS_CACHE_TTL_MS,
+        });
         return SyncStatus.NotDownloaded;
       }
 
       // Check if remote file exists (on mounted drive)
       if (!(await this._pathExists(trackedFile.fullRemotePath))) {
+        this._syncStatusCache.set(cacheKey, {
+          status: SyncStatus.Error,
+          expiresAt: Date.now() + TrackingService.SYNC_STATUS_CACHE_TTL_MS,
+        });
         return SyncStatus.Error;
       }
 
@@ -315,10 +367,25 @@ export class TrackingService {
       const localMtime = localStats.mtime.getTime();
       const remoteMtime = remoteStats.mtime.getTime();
 
+      let status: SyncStatus;
       if (localSize === remoteSize) {
         // Same size is not enough: a same-length edit must still become local-newer.
-        if (localMtime === remoteMtime) {
-          return SyncStatus.Synced;
+        if (localMtime === remoteMtime || Math.abs(localMtime - remoteMtime) <= TrackingService.MTIME_SYNC_TOLERANCE_MS) {
+          status = SyncStatus.Synced;
+          this._syncStatusCache.set(cacheKey, {
+            status,
+            expiresAt: Date.now() + TrackingService.SYNC_STATUS_CACHE_TTL_MS,
+          });
+          return status;
+        }
+
+        if (localSize > TrackingService.MAX_CONTENT_COMPARE_BYTES) {
+          status = localMtime > remoteMtime ? SyncStatus.LocalNewer : SyncStatus.RemoteNewer;
+          this._syncStatusCache.set(cacheKey, {
+            status,
+            expiresAt: Date.now() + TrackingService.SYNC_STATUS_CACHE_TTL_MS,
+          });
+          return status;
         }
 
         const [localContent, remoteContent] = await Promise.all([
@@ -327,15 +394,30 @@ export class TrackingService {
         ]);
 
         if (localContent.equals(remoteContent)) {
-          return SyncStatus.Synced;
+          status = SyncStatus.Synced;
+          this._syncStatusCache.set(cacheKey, {
+            status,
+            expiresAt: Date.now() + TrackingService.SYNC_STATUS_CACHE_TTL_MS,
+          });
+          return status;
         }
 
-        return localMtime > remoteMtime ? SyncStatus.LocalNewer : SyncStatus.RemoteNewer;
+        status = localMtime > remoteMtime ? SyncStatus.LocalNewer : SyncStatus.RemoteNewer;
+      } else {
+        status = remoteMtime > localMtime ? SyncStatus.RemoteNewer : SyncStatus.LocalNewer;
       }
 
-      return remoteMtime > localMtime ? SyncStatus.RemoteNewer : SyncStatus.LocalNewer;
+      this._syncStatusCache.set(cacheKey, {
+        status,
+        expiresAt: Date.now() + TrackingService.SYNC_STATUS_CACHE_TTL_MS,
+      });
+      return status;
     } catch (error) {
       Logger.error('Failed to get sync status:', error);
+      this._syncStatusCache.set(cacheKey, {
+        status: SyncStatus.Error,
+        expiresAt: Date.now() + TrackingService.SYNC_STATUS_CACHE_TTL_MS,
+      });
       return SyncStatus.Error;
     }
   }
@@ -602,6 +684,7 @@ export class TrackingService {
    */
   clearCache(): void {
     this._trackingData = null;
+    this._syncStatusCache.clear();
   }
 
   /**

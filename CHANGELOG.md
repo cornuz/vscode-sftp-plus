@@ -2,6 +2,25 @@
 
 All notable changes to the SFTP+ extension will be documented in this file.
 
+## [Unreleased]
+
+### Improved
+
+- **🪝 Symlink-friendly connections by default** — New and edited connections now enable rclone `--links` by default, which avoids first-connect failures on Unix/Linux hosts exposing symlinks from the mounted root.
+- **🙈 Quieter Git workspaces for mirrored files** — When SFTP+ creates its `.sftp-plus/` working area inside a Git workspace, it now adds that folder to the workspace-local Git exclude file so mirrored host files and tracking metadata do not flood normal Git status output.
+
+### Fixed
+
+- **🧭 Clearer symlink diagnostics** — The connection pipeline now classifies missing `--links` failures explicitly instead of surfacing them as a generic unknown error.
+- **📝 Stable JSON line endings for extension-owned files** — Workspace config and tracking metadata now preserve the existing file line-ending style when rewritten, reducing avoidable CRLF/LF churn on Windows.
+
+## [0.2.8] - 2026-09-09
+
+### Fixed
+
+- **🔓 Released connection-operation locks reliably** — An already-connected host no longer leaves the connection lifecycle locked, so later disconnect and reconnect operations remain available.
+- **🖥️ Show the session console immediately while connecting** — A delayed file-browser refresh can no longer overwrite the newer Console view during the first connection.
+
 ## [0.2.7] - 2026-03-17
 
 ### Improved

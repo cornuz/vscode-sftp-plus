@@ -403,6 +403,11 @@ export class ConnectionFormProvider implements vscode.WebviewViewProvider {
         <input type="checkbox" id="autoReconnectOnDrop">
         <label for="autoReconnectOnDrop">Auto-reconnect on unattended disconnection</label>
       </div>
+
+      <div class="checkbox-group">
+        <input type="checkbox" id="linksSupported">
+        <label for="linksSupported">Support symlinks (recommended for Unix/Linux hosts)</label>
+      </div>
     </div>
 
     <div class="form-section">
@@ -456,6 +461,7 @@ export class ConnectionFormProvider implements vscode.WebviewViewProvider {
       ignoreCertErrors: document.getElementById('ignoreCertErrors'),
       autoConnect: document.getElementById('autoConnect'),
       autoReconnectOnDrop: document.getElementById('autoReconnectOnDrop'),
+      linksSupported: document.getElementById('linksSupported'),
       cacheMode: document.getElementById('cacheMode'),
       idleTimeout: document.getElementById('idleTimeout'),
     };
@@ -503,6 +509,7 @@ export class ConnectionFormProvider implements vscode.WebviewViewProvider {
         ignoreCertErrors: fields.ignoreCertErrors.checked,
         autoConnect: fields.autoConnect.checked,
         autoReconnectOnDrop: fields.autoReconnectOnDrop.checked,
+        linksSupported: fields.linksSupported.checked,
         cacheMode: fields.cacheMode.value,
         idleTimeout: fields.idleTimeout.value.trim() || '5m',
       };
@@ -546,6 +553,7 @@ export class ConnectionFormProvider implements vscode.WebviewViewProvider {
       fields.ignoreCertErrors.checked = config.ignoreCertErrors === true;
       fields.autoConnect.checked = config.autoConnect === true;
       fields.autoReconnectOnDrop.checked = config.autoReconnectOnDrop === true;
+      fields.linksSupported.checked = config.linksSupported === true;
       fields.cacheMode.value = config.cacheMode || 'full';
       fields.idleTimeout.value = config.idleTimeout || '5m';
     }

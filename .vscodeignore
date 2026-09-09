@@ -15,6 +15,7 @@ node_modules/**
 # Development files
 _logs/**
 _screenshots/**
+debug.log
 AGENTS.md
 SFTP+.code-workspace
 pnpm-lock.yaml

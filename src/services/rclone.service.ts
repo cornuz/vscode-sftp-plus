@@ -15,7 +15,8 @@ export class RcloneService {
   private static readonly CERTIFICATE_PATTERN = /(certificate|tls|ssl|x509|handshake|unknown authority|self[- ]signed)/i;
   private static readonly AUTH_PATTERN = /(530|authentication failed|login failed|access denied|permission denied|wrong password|invalid credentials)/i;
   private static readonly TIMEOUT_PATTERN = /(timed out|timeout|etimedout)/i;
-  private static readonly NETWORK_PATTERN = /(econnrefused|connection refused|no such host|network is unreachable|host is down|connection reset)/i;
+  private static readonly NETWORK_PATTERN = /(econnrefused|connection refused|no such host|network is unreachable|host is down|connection reset|forcibly closed by the remote host|wsasend|broken pipe)/i;
+  private static readonly SYMLINK_PATTERN = /symlinks not supported without the --links flag/i;
 
   constructor() {
     this.rclonePath = this.getConfiguredPath();
@@ -153,6 +154,10 @@ export class RcloneService {
     args.push('--inplace');               // Write directly to file, avoid .partial temp files
     args.push('--low-level-retries', '10');  // More retries for network issues
 
+    if (config.linksSupported) {
+      args.push('--links');
+    }
+
     // Add protocol-specific options
     // Note: idle-timeout=0 disables automatic disconnection (keeps connection alive)
     if (config.protocol === 'sftp') {
@@ -218,10 +223,20 @@ export class RcloneService {
       };
     }
 
+    if (RcloneService.SYMLINK_PATTERN.test(normalized)) {
+      return {
+        kind: 'symlink',
+        message: 'Remote symlink support is required. Enable symlink support for this connection and reconnect.',
+        rawMessage: normalized,
+      };
+    }
+
     if (RcloneService.NETWORK_PATTERN.test(normalized)) {
       return {
         kind: 'network',
-        message: 'Network error - check host, port, and reachability',
+        message: normalized.toLowerCase().includes('forcibly closed by the remote host') || normalized.toLowerCase().includes('wsasend')
+          ? 'The FTP server closed the connection during a file transfer or VFS read'
+          : 'Network error - check host, port, and reachability',
         rawMessage: normalized,
       };
     }
@@ -706,12 +721,17 @@ export class RcloneService {
    */
   async unmount(processId: number): Promise<void> {
     try {
-      // On Windows, we need to use taskkill
-      await execAsync(`taskkill /PID ${processId} /F`);
+      // On Windows, kill the full process tree to avoid orphaned conhost/rclone children.
+      await execAsync(`taskkill /PID ${processId} /T /F`, { timeout: 5000 });
       Logger.info(`Killed rclone process ${processId}`);
     } catch (error) {
-      // Process may already be dead
-      Logger.debug(`Process ${processId} may already be stopped`);
+      try {
+        await execAsync(`powershell -NoProfile -Command "Stop-Process -Id ${processId} -Force -ErrorAction Stop"`, { timeout: 5000 });
+        Logger.info(`Killed rclone process ${processId} via PowerShell fallback`);
+      } catch {
+        // Process may already be dead
+        Logger.debug(`Process ${processId} may already be stopped`);
+      }
     }
   }
 
@@ -838,11 +858,15 @@ export class RcloneService {
     try {
       const obscuredPassword = await this.obscurePassword(password);
       const remoteSpec = this.buildConnectionString(config, obscuredPassword);
-      onOutput?.(`rclone lsd ${remoteSpec}`, 'info');
+      const args = ['lsd', remoteSpec, '--max-depth', '1'];
+      if (config.linksSupported) {
+        args.push('--links');
+      }
+      onOutput?.(`rclone ${args.join(' ')}`, 'info');
 
       // Use rclone lsd to list directories (quick test)
       const { stdout, stderr } = await execAsync(
-        `"${this.rclonePath}" lsd "${remoteSpec}" --max-depth 1`,
+        `"${this.rclonePath}" ${args.map(arg => arg.includes(' ') || arg.includes(':') ? `"${arg}"` : arg).join(' ')}`,
         { timeout: 15000 }
       );
 

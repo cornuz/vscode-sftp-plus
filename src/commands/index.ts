@@ -588,6 +588,17 @@ async function promptForConnectionConfig(): Promise<ConnectionConfig | undefined
       }
     }
 
+    const linksSupported = await vscode.window.showQuickPick(
+      [
+        { label: 'Yes', description: 'Recommended for Unix/Linux hosts and remote roots with symlinks', value: true },
+        { label: 'No', description: 'Disable only when you know the remote does not expose symlinks', value: false },
+      ],
+      { placeHolder: 'Enable symlink support (--links)? Recommended: Yes' }
+    );
+    if (linksSupported) {
+      config.linksSupported = linksSupported.value;
+    }
+
     // Auto-connect
     const autoConnect = await vscode.window.showQuickPick(
       [

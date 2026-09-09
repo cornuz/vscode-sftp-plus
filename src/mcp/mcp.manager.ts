@@ -61,7 +61,7 @@ export class McpManager implements vscode.Disposable {
    * even before a specific host has MCP actively resumed.
    */
   initializeToolHandlers(): void {
-    this._registerToolHandlers();
+    this._syncToolRegistration();
   }
 
   /**
@@ -117,9 +117,36 @@ export class McpManager implements vscode.Disposable {
     }
 
     if (restored > 0) {
+      this._syncToolRegistration();
       Logger.info(`Restored MCP state for ${restored} connection(s)`);
       this._onDidChangeMcpStatus.fire('');
     }
+  }
+
+  private _hasMcpDemand(): boolean {
+    return this.connectionManager.getConnections().some(connection => connection.mcpActive || connection.mcpSuspended);
+  }
+
+  private _disposeToolHandlers(): void {
+    if (!this._toolsRegistered) {
+      return;
+    }
+
+    for (const disposable of this._disposables) {
+      disposable.dispose();
+    }
+    this._disposables = [];
+    this._toolsRegistered = false;
+    Logger.info('SFTP+ Language Model Tools unregistered');
+  }
+
+  private _syncToolRegistration(): void {
+    if (this._hasMcpDemand()) {
+      this._registerToolHandlers();
+      return;
+    }
+
+    this._disposeToolHandlers();
   }
 
   /**
@@ -283,6 +310,41 @@ export class McpManager implements vscode.Disposable {
     return new vscode.LanguageModelToolResult([
       new vscode.LanguageModelTextPart(
         `Error: ${actionDescription} failed on "${connectionName}": ${message}${extraDetail ? `\n${extraDetail}` : ''}`
+      ),
+    ]);
+  }
+
+  private _requireAiPathAccess(
+    connectionName: string,
+    fullPath: string,
+    requirement: 'host' | 'local-or-host',
+    remotePath: string
+  ): vscode.LanguageModelToolResult | null {
+    const mode = this.getAiWriteMode(connectionName, fullPath);
+
+    if (requirement === 'host') {
+      if (mode === 'host') {
+        return null;
+      }
+
+      return new vscode.LanguageModelToolResult([
+        new vscode.LanguageModelTextPart(
+          `Error: Direct host access is not granted for "${remotePath}" on "${connectionName}". ` +
+          `Host mode is required for MCP tools that read or browse the mounted server directly. ` +
+          `Ask the user to enable Host access on that file or on a parent folder in the SFTP+ panel. ` +
+          `If the user prefers the safer local workflow, request LOCAL mode and then use sftp-plus_prepare_edit on the specific file.`
+        ),
+      ]);
+    }
+
+    if (mode === 'local' || mode === 'host') {
+      return null;
+    }
+
+    return new vscode.LanguageModelToolResult([
+      new vscode.LanguageModelTextPart(
+        `Error: No AI access has been granted for "${remotePath}" on "${connectionName}". ` +
+        `Ask the user to grant LOCAL or HOST access for that file or a parent folder in the SFTP+ panel, or use sftp-plus_request_write_access for a specific file.`
       ),
     ]);
   }
@@ -451,7 +513,7 @@ export class McpManager implements vscode.Disposable {
     }
 
     // Tools are already registered eagerly during activation; keep idempotent call.
-    this._registerToolHandlers();
+    this._syncToolRegistration();
 
     // Initialize AI writable paths map (unless restored from suspend)
     if (!connection.aiWritablePaths) {
@@ -464,6 +526,7 @@ export class McpManager implements vscode.Disposable {
     vscode.window.showInformationMessage(`SFTP+: Copilot access enabled for ${connectionName}`);
 
     this._persistMcpState();
+    this._syncToolRegistration();
     this._onDidChangeMcpStatus.fire(connectionName);
   }
 
@@ -485,6 +548,7 @@ export class McpManager implements vscode.Disposable {
     vscode.window.showInformationMessage(`SFTP+: Copilot access disabled for ${connectionName}`);
 
     this._persistMcpState();
+    this._syncToolRegistration();
     this._onDidChangeMcpStatus.fire(connectionName);
   }
 
@@ -504,6 +568,7 @@ export class McpManager implements vscode.Disposable {
 
     Logger.info(`MCP suspended for ${connectionName} (will auto-resume on reconnect)`);
     this._persistMcpState();
+    this._syncToolRegistration();
     this._onDidChangeMcpStatus.fire(connectionName);
   }
 
@@ -526,8 +591,7 @@ export class McpManager implements vscode.Disposable {
       return;
     }
 
-    // Tools are already registered eagerly during activation; keep idempotent call.
-    this._registerToolHandlers();
+    this._syncToolRegistration();
 
     // Restore MCP active state
     connection.mcpActive = true;
@@ -542,6 +606,7 @@ export class McpManager implements vscode.Disposable {
     vscode.window.showInformationMessage(`SFTP+: Copilot access auto-resumed for ${connectionName}`);
 
     this._persistMcpState();
+    this._syncToolRegistration();
     this._onDidChangeMcpStatus.fire(connectionName);
   }
 
@@ -1024,14 +1089,17 @@ export class McpManager implements vscode.Disposable {
     if (validation.error) return validation.error;
     const connection = validation.connection;
 
-    // Check drive accessibility with retry
-    const driveError = await this._checkDriveAccessible(connection, connectionName);
-    if (driveError) return driveError;
-
     // Construct the path - handle both with and without leading slash
     const basePath = `${connection.mountedDrive}:`;
     const cleanRemotePath = remotePath ? remotePath.replace(/^\/+/, '') : '';
     const targetPath = cleanRemotePath ? path.join(basePath, cleanRemotePath) : basePath + path.sep;
+
+    const accessError = this._requireAiPathAccess(connectionName, targetPath, 'host', remotePath || '/');
+    if (accessError) return accessError;
+
+    // Check drive accessibility with retry
+    const driveError = await this._checkDriveAccessible(connection, connectionName);
+    if (driveError) return driveError;
 
     Logger.info(`MCP list_files: basePath=${basePath}, remotePath=${remotePath}, targetPath=${targetPath}, recursive=${recursive}`);
 
@@ -1146,14 +1214,17 @@ export class McpManager implements vscode.Disposable {
     if (validation.error) return validation.error;
     const connection = validation.connection;
 
-    // Check drive accessibility with retry
-    const driveError = await this._checkDriveAccessible(connection, connectionName);
-    if (driveError) return driveError;
-
     // Construct the path - handle both with and without leading slash
     const basePath = `${connection.mountedDrive}:`;
     const cleanRemotePath = remotePath.replace(/^\/+/, '');
     const fullPath = path.join(basePath, cleanRemotePath);
+
+    const accessError = this._requireAiPathAccess(connectionName, fullPath, 'host', remotePath);
+    if (accessError) return accessError;
+
+    // Check drive accessibility with retry
+    const driveError = await this._checkDriveAccessible(connection, connectionName);
+    if (driveError) return driveError;
 
     Logger.info(`MCP read_file: basePath=${basePath}, remotePath=${remotePath}, fullPath=${fullPath}`);
 
@@ -1275,14 +1346,17 @@ export class McpManager implements vscode.Disposable {
     if (validation.error) return validation.error;
     const connection = validation.connection;
 
-    // Check drive accessibility with retry
-    const driveError = await this._checkDriveAccessible(connection, connectionName);
-    if (driveError) return driveError;
-
     // Construct the remote path
     const basePath = `${connection.mountedDrive}:`;
     const cleanRemotePath = remotePath.replace(/^\/+/, '');
     const fullRemotePath = path.join(basePath, cleanRemotePath);
+
+    const accessError = this._requireAiPathAccess(connectionName, fullRemotePath, 'local-or-host', remotePath);
+    if (accessError) return accessError;
+
+    // Check drive accessibility with retry
+    const driveError = await this._checkDriveAccessible(connection, connectionName);
+    if (driveError) return driveError;
 
     Logger.info(`MCP prepare_edit: remotePath=${remotePath}, fullRemotePath=${fullRemotePath}`);
 
@@ -1380,16 +1454,16 @@ export class McpManager implements vscode.Disposable {
     if (formattedPaths.length === 0) {
       return new vscode.LanguageModelToolResult([
         new vscode.LanguageModelTextPart(
-          `No paths have write access enabled on "${connectionName}". ` +
-          `Use sftp-plus_request_write_access to ask the user for permission on specific files.`
+          `No paths have AI access enabled on "${connectionName}". ` +
+          `Use sftp-plus_request_write_access to ask the user for permission on specific files, or ask the user to grant Host access on a folder from the SFTP+ panel.`
         ),
       ]);
     }
 
     return new vscode.LanguageModelToolResult([
       new vscode.LanguageModelTextPart(
-        `Files/folders with write access on "${connectionName}":\n` +
-        `(🟢 LOCAL = edit local copy with diff preview, 🔴 HOST = direct server write)\n\n` +
+        `Files/folders with AI access on "${connectionName}":\n` +
+        `(🟢 LOCAL = download locally for diff-based editing, 🔴 HOST = direct remote read/write and browsing)\n\n` +
         `${formattedPaths.join('\n')}`
       ),
     ]);
@@ -1476,15 +1550,18 @@ export class McpManager implements vscode.Disposable {
     if (validation.error) return validation.error;
     const connection = validation.connection;
 
-    // Check drive accessibility with retry
-    const driveError = await this._checkDriveAccessible(connection, connectionName);
-    if (driveError) return driveError;
-
     const basePath = `${connection.mountedDrive}:`;
     const cleanRemotePath = remotePath ? remotePath.replace(/^\/+/, '') : '';
     const startPath = cleanRemotePath ? path.join(basePath, cleanRemotePath) : basePath + path.sep;
     const limit = maxResults ?? 100;
     const filterType = type ?? 'all';
+
+    const accessError = this._requireAiPathAccess(connectionName, startPath, 'host', remotePath || '/');
+    if (accessError) return accessError;
+
+    // Check drive accessibility with retry
+    const driveError = await this._checkDriveAccessible(connection, connectionName);
+    if (driveError) return driveError;
 
     Logger.info(`MCP search_files: pattern=${pattern}, path=${remotePath}, useRegex=${useRegex}, type=${filterType}`);
 
@@ -1610,15 +1687,18 @@ export class McpManager implements vscode.Disposable {
     if (validation.error) return validation.error;
     const connection = validation.connection;
 
-    // Check drive accessibility with retry
-    const driveError = await this._checkDriveAccessible(connection, connectionName);
-    if (driveError) return driveError;
-
     const basePath = `${connection.mountedDrive}:`;
     const cleanRemotePath = remotePath ? remotePath.replace(/^\/+/, '') : '';
     const startPath = cleanRemotePath ? path.join(basePath, cleanRemotePath) : basePath + path.sep;
     const depth = maxDepth ?? 5;
     const withFiles = includeFiles !== false; // Default true
+
+    const accessError = this._requireAiPathAccess(connectionName, startPath, 'host', remotePath || '/');
+    if (accessError) return accessError;
+
+    // Check drive accessibility with retry
+    const driveError = await this._checkDriveAccessible(connection, connectionName);
+    if (driveError) return driveError;
 
     Logger.info(`MCP get_tree: path=${remotePath}, maxDepth=${depth}, includeFiles=${withFiles}`);
 
